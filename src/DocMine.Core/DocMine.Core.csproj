@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    DocMine.Core — 도메인 라이브러리. GUI 무의존.
+
+    포함:
+      Config/      UserSettings (%APPDATA%\DocMine\settings.json) + AppConfig 빌더
+                   + LegacyEnvImporter (.env → settings.json 1회 마이그레이션)
+      Scanning/    드라이브 재귀 스캐너 + CSV writer
+      Hwp/         HWPX ZIP 직접 파싱 + COM 래퍼 (Forge HwpSession 차용)  [Phase 4]
+      Pdf/         PdfPig 기반 텍스트 추출
+      Db/          MySqlConnector 기반 Repository + 검색 서비스
+      Pipeline/    스캔/HWP 적재/PDF 적재 runner
+
+    의존:
+      MySqlConnector — pymysql 대체 (async, MariaDB 호환, MIT)
+      PdfPig         — PyMuPDF 대체 (순수 매니지드, Apache 2.0)
+  -->
+
+  <ItemGroup>
+    <PackageReference Include="MySqlConnector" Version="2.3.7" />
+    <PackageReference Include="PdfPig" Version="0.1.14" />
+  </ItemGroup>
+
+</Project>

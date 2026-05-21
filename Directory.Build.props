@@ -1,0 +1,45 @@
+<Project>
+
+  <!--
+    DocMine C# port 공통 빌드 설정.
+
+    Forge Directory.Build.props 와 동일 패턴 — src/, tests/ 하위 모든 csproj
+    가 자동 상속받음 (MSBuild 표준). 개별 csproj 가 같은 속성을 명시하면
+    그 값으로 override.
+
+    설정 의도:
+      - net8.0-windows: WinForms + Win32 P/Invoke + 한/글 COM. 운용 PC 에
+        .NET 8 Desktop Runtime 가정. FDD 배포로 단일 exe ~5–10MB 목표
+        (PdfPig + MySqlConnector 포함, MuPDF.NET 같은 네이티브 dll 없음).
+      - Nullable enable: 신규 코드 전반 nullable annotation 강제.
+      - LangVersion latest: C# 12 (record, primary ctor, [..] 등).
+      - UseWindowsForms 는 WinForms 가 필요한 csproj 만 켬 (UI/HwpWorker).
+        라이브러리(Core/Win32) 와 테스트는 켜지 않음.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <NeutralLanguage>ko-KR</NeutralLanguage>
+
+    <!-- PDB 를 dll/exe 안에 embed → publish 디렉토리에 .pdb 따로 안 남음. -->
+    <DebugType>embedded</DebugType>
+    <DebugSymbols>true</DebugSymbols>
+
+    <!-- ─ 버전 SSOT ─────────────────────────────────────────────────────
+         새 버전 릴리스 시 <Version> 한 줄만 bump. Python 판 0.4.3 다음
+         이지만 C# 포트는 별도 트랙으로 0.5.0 부터 시작. -->
+    <Version>0.5.0</Version>
+    <FileVersion>$(Version).0</FileVersion>
+    <AssemblyVersion>$(Version).0</AssemblyVersion>
+    <InformationalVersion>$(Version)</InformationalVersion>
+    <Product>DocMine</Product>
+    <Company>kinphw</Company>
+    <Copyright>Copyright (c) 2026 kinphw</Copyright>
+  </PropertyGroup>
+
+</Project>

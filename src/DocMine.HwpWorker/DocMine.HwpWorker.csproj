@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    DocMine.HwpWorker — 한/글 COM 워커 (별도 .exe).
+
+    Python 의 multiprocessing.Process(worker_main) 등가물. .NET 은 process
+    fork 가 없어 mp.Queue 패턴을 직접 옮길 수 없으므로, STDIO JSON-line
+    프로토콜로 통신하는 독립 console exe 를 별도 빌드.
+
+    크래시 격리:
+      한/글 COM 이 워커 안에서 죽어도 메인 GUI 는 살아남아야 함. 메인이
+      Process.Exited 를 감지해 새 워커를 spawn — Python 의 'COM_RESTART'
+      카운터 + 타임아웃 재시작 패턴 1:1 재현.
+
+    Job Object:
+      메인 프로세스가 KILL_ON_JOB_CLOSE Job 에 자가 할당해 두면, Process.Start
+      로 띄운 자식 워커는 동일 Job 을 자동 상속 → 메인이 어떻게 죽든 워커
+      커널 차원에서 회수. 한/글 본체(Hwp.exe) 는 ShellExecute 경로에 따라
+      Job 을 벗어날 수 있어 taskkill 보조 안전망 유지.
+
+    Interop:
+      Forge 의 Interop.HwpObject.dll (한컴 HwpObject.tlb 의 tlbimp 산출물) 을
+      Reference 로 가져옴. docmine 은 본문 텍스트만 빼므로 sub-COM 호출은
+      거의 없고 GetTextFile/Open/Close 정도 — dynamic 만으로도 가능하지만
+      Forge 패턴 일관성 + 미래 확장 위해 PIA 채택.
+
+    OutputType=Exe + 콘솔 모드: 메인 GUI 가 stdin/stdout 으로 통신.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <UseWindowsForms>false</UseWindowsForms>
+    <AssemblyName>DocMine.HwpWorker</AssemblyName>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DocMine.Core\DocMine.Core.csproj" />
+    <ProjectReference Include="..\DocMine.Win32\DocMine.Win32.csproj" />
+  </ItemGroup>
+
+</Project>

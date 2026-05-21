@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    DocMine.UI — WinForms GUI 진입점. unified_gui.py 등가.
+
+    ★ AssemblyName=python — DRM 화이트리스트 우회 필수.
+      운영환경 DRM 솔루션(Fasoo·MarkAny 등) 이 프로세스 basename 으로
+      파일 I/O 허용 여부를 판정하므로, 발행 산출물 이름이 정확히
+      'python.exe' 여야 PDF 등 파일 접근이 허용됨. Python 판이 PyInstaller
+      에서 name='python' 으로 빌드하는 이유와 동일.
+
+    publish 옵션은 csproj 에 박아둠 — 호출 시점에 -p:... 반복 없음.
+      FDD (기본, 가장 가벼움):
+        dotnet publish -c Release -p:SelfContained=false
+      자체포함 (.NET 8 Runtime 없는 PC 용):
+        dotnet publish -c Release -p:SelfContained=true -p:EnableCompressionInSingleFile=true
+
+    PublishTrimmed 는 사용 불가 — WinForms + dynamic COM (HwpFrame.HwpObject)
+    이 트리밍과 비호환. Forge 와 동일 제약.
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>python</AssemblyName>
+
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DocMine.Core\DocMine.Core.csproj" />
+    <ProjectReference Include="..\DocMine.Win32\DocMine.Win32.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    DocMine.Win32 — P/Invoke 모음.
+
+    포함:
+      Drives.cs           GetLogicalDrives + GetVolumeInformationW (drive_picker.py)
+      JobObject.cs        CreateJobObject + KILL_ON_JOB_CLOSE (inserter.py _setup_kill_on_close_job)
+      Clipboard.cs        CF_HDROP 파일 클립보드 (search_gui.py _copy_files_to_clipboard)
+      Window.cs           EnumWindows / EnumChildWindows / SendMessage (HWP 팝업 디스미서)
+      ShellExecute.cs     explorer /select 호출용 (search_gui.py _on_open_path)
+
+    GUI 무의존 — Core 와 동급의 빌딩블록.
+  -->
+
+</Project>

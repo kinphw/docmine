@@ -17,3 +17,10 @@ release/
 docmine_v*.zip
 hwpmine_v*.zip
 *.exe
+
+# .NET (C# port — DocMine.{Core,Win32,HwpWorker,UI})
+bin/
+obj/
+publish/
+*.user
+.vs/
