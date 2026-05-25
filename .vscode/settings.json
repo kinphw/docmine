@@ -1,0 +1,5 @@
+{
+  // 개인 설정 추가 시 여기에. 현재는 .NET 기본값으로 충분.
+  // 폴더에 Python(.venv) 과 C# 둘 다 있어 OmniSharp/C# Dev Kit 가 .sln 자동 감지.
+  "dotnet.defaultSolution": "DocMine.sln"
+}
