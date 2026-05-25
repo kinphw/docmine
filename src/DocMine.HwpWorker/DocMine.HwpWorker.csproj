@@ -19,10 +19,9 @@
       Job 을 벗어날 수 있어 taskkill 보조 안전망 유지.
 
     Interop:
-      Forge 의 Interop.HwpObject.dll (한컴 HwpObject.tlb 의 tlbimp 산출물) 을
-      Reference 로 가져옴. docmine 은 본문 텍스트만 빼므로 sub-COM 호출은
-      거의 없고 GetTextFile/Open/Close 정도 — dynamic 만으로도 가능하지만
-      Forge 패턴 일관성 + 미래 확장 위해 PIA 채택.
+      dynamic late-bind (Activator.CreateInstance + Type.GetTypeFromProgID).
+      docmine 은 GetTextFile/Open/Close 정도만 호출 — sub-COM (HParameterSet
+      등) 미사용이라 PIA 불필요. PIA 없으면 NuGet 의존도 줄고 배포 단순.
 
     OutputType=Exe + 콘솔 모드: 메인 GUI 가 stdin/stdout 으로 통신.
   -->
@@ -32,6 +31,11 @@
     <UseWindowsForms>false</UseWindowsForms>
     <AssemblyName>DocMine.HwpWorker</AssemblyName>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- 배포 시 단일 exe 로 — UI 의 AfterPublish 가 이 산출물을 가져옴.
+         SelfContained=false 명시 — RuntimeIdentifier 있어도 FDD 유지 (UI 와 일치). -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
 
   <ItemGroup>

@@ -17,12 +17,7 @@ using MySqlConnector;
 
 namespace DocMine.Core.Pipeline;
 
-public sealed record CsvRow(
-    string Directory,
-    string Filename,
-    string Extension,
-    long   SizeBytes,
-    string Modified);
+// CsvRow 는 CsvIngestHelpers.cs 로 이동 (HWP/PDF 공유).
 
 public sealed record PdfInsertProgress(
     int Total,    // 처리 대상 (CSV 의 PDF 행 총수)
@@ -69,7 +64,7 @@ ON DUPLICATE KEY UPDATE
         CancellationToken cancellationToken = default)
     {
         // JobObject 셋업은 UI 진입점(Program.Main) 에서 한 번 처리 — 여기선 무관.
-        var allRows = LoadCsv(csvPath);
+        var allRows = CsvIngestHelpers.LoadCsv(csvPath);
         var pdfRows = allRows
             .Where(r => string.Equals(r.Extension, ".pdf", StringComparison.OrdinalIgnoreCase))
             .ToList();
@@ -86,7 +81,7 @@ ON DUPLICATE KEY UPDATE
         }
 
         _repo.EnsureDatabase();
-        var knownKeys = LoadExistingKeys(rows);
+        var knownKeys = CsvIngestHelpers.LoadExistingKeys(_cfg, _repo, rows);
         if (knownKeys.Count > 0)
             onLog?.Invoke($"  ✓ DB 기존 파일 {knownKeys.Count:N0}건은 파싱 없이 건너뜁니다.");
 
@@ -221,99 +216,7 @@ ON DUPLICATE KEY UPDATE
 
     private record WorkerResult(CsvRow Row, string Status, string? Text, string? ErrMsg);
 
-    // ─ CSV / DB 헬퍼 ─────────────────────────────────────────────────
-
-    private static List<CsvRow> LoadCsv(string csvPath)
-    {
-        var rows = new List<CsvRow>();
-        using var reader = new StreamReader(csvPath, new System.Text.UTF8Encoding(true));
-        var header = reader.ReadLine();
-        if (header is null) return rows;
-
-        // Python csv.DictReader 등가 — 컬럼 인덱스 매핑.
-        var cols = header.Split(',')
-            .Select((c, i) => (Name: c.Trim().Trim('﻿'), Idx: i))
-            .ToDictionary(p => p.Name, p => p.Idx, StringComparer.OrdinalIgnoreCase);
-        int Col(string name) => cols.TryGetValue(name, out var i) ? i : -1;
-        var iDir = Col("directory"); var iFn = Col("filename");
-        var iExt = Col("extension"); var iSz = Col("size_bytes"); var iMt = Col("modified");
-
-        string? line;
-        while ((line = reader.ReadLine()) is not null)
-        {
-            var parts = ParseCsvLine(line);
-            if (parts.Count <= Math.Max(iDir, iFn)) continue;
-            rows.Add(new CsvRow(
-                Directory: parts[iDir],
-                Filename:  parts[iFn],
-                Extension: iExt >= 0 && iExt < parts.Count ? parts[iExt] : "",
-                SizeBytes: iSz >= 0 && iSz < parts.Count && long.TryParse(parts[iSz], out var sz) ? sz : 0,
-                Modified:  iMt >= 0 && iMt < parts.Count ? parts[iMt] : ""));
-        }
-        return rows;
-    }
-
-    // RFC 4180 의 최소 구현 — 따옴표 안의 콤마/이중따옴표만 처리.
-    // DriveScanner.CsvEscape 가 만든 CSV 라 단순 케이스만 필요.
-    private static List<string> ParseCsvLine(string line)
-    {
-        var result = new List<string>();
-        var sb = new System.Text.StringBuilder();
-        var inQuote = false;
-        for (var i = 0; i < line.Length; i++)
-        {
-            var ch = line[i];
-            if (inQuote)
-            {
-                if (ch == '"')
-                {
-                    if (i + 1 < line.Length && line[i + 1] == '"') { sb.Append('"'); i++; }
-                    else inQuote = false;
-                }
-                else sb.Append(ch);
-            }
-            else
-            {
-                if (ch == ',') { result.Add(sb.ToString()); sb.Clear(); }
-                else if (ch == '"' && sb.Length == 0) inQuote = true;
-                else sb.Append(ch);
-            }
-        }
-        result.Add(sb.ToString());
-        return result;
-    }
-
-    private HashSet<(string, string)> LoadExistingKeys(List<CsvRow> rows)
-    {
-        var keys = rows
-            .Where(r => !string.IsNullOrEmpty(r.Directory) && !string.IsNullOrEmpty(r.Filename))
-            .Select(r => (r.Directory, r.Filename))
-            .ToHashSet();
-        if (keys.Count == 0) return keys;
-
-        var existing = new HashSet<(string, string)>();
-        const int chunkSize = 500;
-        var keyList = keys.ToList();
-        using var conn = _repo.OpenConnection();
-        for (var i = 0; i < keyList.Count; i += chunkSize)
-        {
-            var chunk = keyList.Skip(i).Take(chunkSize).ToList();
-            var placeholders = string.Join(", ", chunk.Select((_, j) => $"(@d{j}, @f{j})"));
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText =
-                $"SELECT directory, filename FROM `{_cfg.DbTable}` " +
-                $"WHERE (directory, filename) IN ({placeholders})";
-            for (var j = 0; j < chunk.Count; j++)
-            {
-                cmd.Parameters.AddWithValue($"@d{j}", chunk[j].Directory);
-                cmd.Parameters.AddWithValue($"@f{j}", chunk[j].Filename);
-            }
-            using var rdr = cmd.ExecuteReader();
-            while (rdr.Read())
-                existing.Add((rdr.GetString(0), rdr.GetString(1)));
-        }
-        return existing;
-    }
+    // ─ CSV / DB 헬퍼는 CsvIngestHelpers.cs 로 이동 (HWP/PDF 공유) ────
 
     private async Task InsertAsync(MySqlConnection conn, CsvRow row, string? text, string status, string? errMsg)
     {

@@ -32,6 +32,41 @@
   <ItemGroup>
     <ProjectReference Include="..\DocMine.Core\DocMine.Core.csproj" />
     <ProjectReference Include="..\DocMine.Win32\DocMine.Win32.csproj" />
+    <!-- HwpWorker — build 산출물은 자동 복사(개발 편의), publish 는 별도 target 처리. -->
+    <ProjectReference Include="..\DocMine.HwpWorker\DocMine.HwpWorker.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <OutputItemType>Content</OutputItemType>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Private>true</Private>
+    </ProjectReference>
   </ItemGroup>
+
+  <!--
+    AfterPublish — UI publish 후 HwpWorker 도 자동 publish 후 단일 exe 만 같은 폴더로 복사.
+    이렇게 해야 박건영님이 'dotnet publish DocMine.UI...' 한 번으로 publish 폴더에
+    python.exe + DocMine.HwpWorker.exe 두 파일이 같이 떨어짐.
+
+    HwpWorker 는 PublishSingleFile=true 로 자체 단일 exe. 임시 폴더에 publish 후
+    exe 만 옮기고 dependencies (.deps.json/.runtimeconfig.json) 는 삭제 — 단일 exe 가
+    그 메타데이터를 내부에 가지고 있어 불필요.
+
+    SelfContained 는 UI 와 동일하게 전파 — FDD/SelfContained 일치 보장.
+  -->
+  <Target Name="PublishHwpWorker" AfterTargets="Publish">
+    <PropertyGroup>
+      <_HwpWorkerProj>$(MSBuildThisFileDirectory)..\DocMine.HwpWorker\DocMine.HwpWorker.csproj</_HwpWorkerProj>
+      <_HwpStageDir>$(PublishDir)__hwp_stage\</_HwpStageDir>
+      <_HwpSelfContained Condition=" '$(SelfContained)' == '' ">false</_HwpSelfContained>
+      <_HwpSelfContained Condition=" '$(SelfContained)' != '' ">$(SelfContained)</_HwpSelfContained>
+    </PropertyGroup>
+    <Exec Command="dotnet publish &quot;$(_HwpWorkerProj)&quot; -c $(Configuration) -p:SelfContained=$(_HwpSelfContained) --nologo -o &quot;$(_HwpStageDir)&quot;" />
+    <ItemGroup>
+      <_HwpWorkerExe Include="$(_HwpStageDir)DocMine.HwpWorker.exe" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_HwpWorkerExe)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+    <RemoveDir Directories="$(_HwpStageDir)" />
+    <!-- AfterPublish 가 한 번 더 끼어드는 부수 산출물 정리. -->
+    <Delete Files="$(PublishDir)DocMine.HwpWorker.deps.json;$(PublishDir)DocMine.HwpWorker.runtimeconfig.json" />
+  </Target>
 
 </Project>

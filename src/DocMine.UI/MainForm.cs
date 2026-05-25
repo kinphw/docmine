@@ -35,10 +35,10 @@ public sealed class MainForm : Form
 
         tabs.TabPages.Add(new ScanTab(ScanTab.Scope.Hwp));
         tabs.TabPages.Add(new ScanTab(ScanTab.Scope.Pdf));
-        tabs.TabPages.Add(MakePlaceholder("② HWP 적재", "Phase 4 에서 구현 (HWP COM 워커)"));
+        tabs.TabPages.Add(new HwpInsertTab());
         tabs.TabPages.Add(new PdfInsertTab());
         tabs.TabPages.Add(new SearchTab());
-        tabs.TabPages.Add(MakePlaceholder("④ 문서 추출", "Phase 4 에서 구현 (HWP/HWPX/PDF → TXT)"));
+        tabs.TabPages.Add(new ExtractorTab());
 
         _settingsTab = new SettingsTab();
         tabs.TabPages.Add(_settingsTab);
