@@ -14,6 +14,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using DocMine.Core.Config;
 using DocMine.Core.Db;
 using DocMine.Core.Pdf;
@@ -187,7 +188,7 @@ ON DUPLICATE KEY UPDATE
                         worker = StartPdfWorker(onLog, idx);
                     }
 
-                    CrashTrace($"[{t.Idx}] >>> {t.Path}");
+                    CrashTrace($"[{t.Idx}] >>> {t.Path}  {SniffPdf(t.Path)}");
                     WorkerResult result;
                     try
                     {
@@ -365,6 +366,68 @@ ON DUPLICATE KEY UPDATE
             }
         }
         catch { /* 진단 로그가 실패해도 본 동작에 영향 없게 */ }
+    }
+
+    // ─ PDF 파일 사전 스니프 — silent crash 원인 분류용 ───────────────
+    //
+    // PdfPig 호출 *전에* 메인이 파일 첫/끝 16KB 만 읽어 위험 신호 검출.
+    // 워커가 죽으면 pdf_crash_trace.log 의 마지막 ">>>" 줄에 이 메타가
+    // 남아 박건영님이 즉시 분류 가능:
+    //   - size 큼 + feat=[]            → PdfPig OOM (#820) 의심
+    //   - feat=[JBIG2,JPX]            → PdfPig 미지원 filter
+    //   - feat=[ENC]                  → 암호화 PDF
+    //   - producer=Hancom             → HWP export, malformed xref 가능성
+    //   - producer=Fasoo Watermark    → DRM 처리 흔적
+    //
+    // sniff 자체가 죽지 않도록 catch-all. PdfPig 호출 0 — 순수 byte read.
+
+    private static readonly Regex ProducerRe = new(
+        @"/Producer\s*\(([^)]{0,128})\)", RegexOptions.Compiled);
+
+    private static string SniffPdf(string path)
+    {
+        try
+        {
+            var fi = new FileInfo(path);
+            var sizeBytes = fi.Length;
+            var sizeStr = sizeBytes >= 1024 * 1024
+                ? $"{sizeBytes / 1024.0 / 1024.0:F1}MB"
+                : $"{sizeBytes / 1024.0:F0}KB";
+
+            using var fs = File.OpenRead(path);
+            var headLen = (int)Math.Min(16384, sizeBytes);
+            var headBuf = new byte[headLen];
+            fs.ReadExactly(headBuf);
+            var head = System.Text.Encoding.ASCII.GetString(headBuf);
+
+            var tail = "";
+            if (sizeBytes > 32768)
+            {
+                var tailBuf = new byte[16384];
+                fs.Position = sizeBytes - tailBuf.Length;
+                fs.ReadExactly(tailBuf);
+                tail = System.Text.Encoding.ASCII.GetString(tailBuf);
+            }
+            var combined = head + tail;
+
+            var flags = new List<string>();
+            if (combined.Contains("/JBIG2Decode")) flags.Add("JBIG2");
+            if (combined.Contains("/JPXDecode"))   flags.Add("JPX");
+            if (combined.Contains("/Encrypt"))     flags.Add("ENC");
+            if (combined.Contains("/XFA"))         flags.Add("XFA");
+            if (combined.Contains("/AcroForm"))    flags.Add("FORM");
+
+            string producer = "";
+            var m = ProducerRe.Match(combined);
+            if (m.Success) producer = $" producer='{m.Groups[1].Value.Trim()}'";
+
+            var featStr = flags.Count > 0 ? $" feat=[{string.Join(",", flags)}]" : "";
+            return $"size={sizeStr}{featStr}{producer}";
+        }
+        catch (Exception ex)
+        {
+            return $"sniff-failed: {ex.GetType().Name}";
+        }
     }
 
     // ─ 통계 ──────────────────────────────────────────────────────────

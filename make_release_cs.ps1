@@ -82,6 +82,18 @@ $readme = @"
 ## 설정 위치
 - ``%APPDATA%\DocMine\settings.json`` — DB 접속 + 스캔 예외 폴더
 
+## 진단 (PDF 적재 silent crash 발생 시)
+1. 작업 폴더의 ``pdf_crash_trace.log`` 마지막 ``>>>`` 줄 확인 → 죽인 파일의
+   path / size / feat (JBIG2/JPX/ENC/XFA/FORM) / producer 메타 확인.
+2. Windows Error Reporting 자동 덤프 활성화 (관리자 cmd, 운영 PC 1회):
+``````
+reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" /v DumpFolder /t REG_EXPAND_SZ /d "%LOCALAPPDATA%\CrashDumps" /f
+reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" /v DumpType /t REG_DWORD /d 2 /f
+``````
+   crash 후 ``%LOCALAPPDATA%\CrashDumps\python.exe.*.dmp`` 가 생성됨.
+   덤프의 faulting module 이 ``f_sps.dll`` → Fasoo DRM 충돌,
+   ``coreclr.dll`` → .NET OOM/StackOverflow.
+
 ## 빌드
 ``pwsh -File make_release_cs.ps1``
 "@
