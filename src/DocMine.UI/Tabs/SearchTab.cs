@@ -50,6 +50,8 @@ public sealed class SearchTab : TabPage
 
     // 하단 버튼
     private readonly Button _moreBtn, _allBtn, _delBtn, _openBtn, _openPathBtn;
+    private readonly Label _infoLabel;
+    private const string InfoDefault = "더블클릭: 파일 열기  |  드래그/Ctrl+C: 탐색기로 복사  |  Del: 검색에서 제외";
 
     // 페이징 / 상태
     private int _offset;
@@ -181,8 +183,26 @@ public sealed class SearchTab : TabPage
         logFrame.Controls.Add(_log);
         root.Controls.Add(logFrame, 0, 2);
 
-        // ─ 하단 버튼 ──────────────────────────────────────────────────
-        var bot = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 4, 0, 0) };
+        // ─ 하단: info label (좌) + 버튼 (우) ─────────────────────────
+        var bot = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top, AutoSize = true,
+            ColumnCount = 2, RowCount = 1, Padding = new Padding(0, 4, 0, 0),
+        };
+        bot.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        bot.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+        _infoLabel = new Label
+        {
+            Text = InfoDefault,
+            AutoSize = true,
+            ForeColor = Color.Gray,
+            Padding = new Padding(0, 6, 0, 0),
+            Font = new Font("맑은 고딕", 9),
+        };
+        bot.Controls.Add(_infoLabel, 0, 0);
+
+        var btnFlow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft };
         _openBtn      = new Button { Text = "파일 열기",  AutoSize = true, Enabled = false };
         _openPathBtn  = new Button { Text = "경로 열기",  AutoSize = true, Enabled = false };
         _delBtn       = new Button { Text = "제외 (Del)", AutoSize = true, Enabled = false };
@@ -193,11 +213,13 @@ public sealed class SearchTab : TabPage
         _delBtn.Click      += (_, _) => DeleteSelected();
         _allBtn.Click      += async (_, _) => await LoadAllAsync();
         _moreBtn.Click     += async (_, _) => await LoadMoreAsync();
-        bot.Controls.Add(_openBtn);
-        bot.Controls.Add(_openPathBtn);
-        bot.Controls.Add(_delBtn);
-        bot.Controls.Add(_allBtn);
-        bot.Controls.Add(_moreBtn);
+        btnFlow.Controls.Add(_openBtn);
+        btnFlow.Controls.Add(_openPathBtn);
+        btnFlow.Controls.Add(_delBtn);
+        btnFlow.Controls.Add(_allBtn);
+        btnFlow.Controls.Add(_moreBtn);
+        bot.Controls.Add(btnFlow, 1, 0);
+
         root.Controls.Add(bot, 0, 3);
 
         Controls.Add(root);
@@ -404,6 +426,8 @@ public sealed class SearchTab : TabPage
             _openPathBtn.Enabled = false;
             _delBtn.Enabled = false;
             _delBtn.Text = "제외 (Del)";
+            _infoLabel.Text = InfoDefault;
+            _infoLabel.ForeColor = Color.Gray;
             return;
         }
 
@@ -429,6 +453,20 @@ public sealed class SearchTab : TabPage
 
         _openBtn.Enabled     = sel.Count == 1;
         _openPathBtn.Enabled = sel.Count == 1;
+
+        // info_label — 단일 선택은 파일 경로, 다중은 건수.
+        if (sel.Count == 1)
+        {
+            var row = (FullRow)sel[0].Tag!;
+            var fp = Path.Combine(row.Directory, row.Filename);
+            _infoLabel.Text = fp.Length <= 110 ? fp : fp[..107] + "…";
+            _infoLabel.ForeColor = Color.Black;
+        }
+        else
+        {
+            _infoLabel.Text = $"{sel.Count}건 선택됨";
+            _infoLabel.ForeColor = Color.Black;
+        }
     }
 
     // ─ 파일 열기 / 경로 열기 / 제외 / 삭제 ───────────────────────────

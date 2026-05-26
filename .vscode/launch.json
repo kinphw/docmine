@@ -2,9 +2,10 @@
   // F5 디버그 구성. 사이드바 'Run and Debug' 패널 드롭다운에서 선택.
   // breakpoint 는 디버거 attach 후 자동 hit.
   //
-  // 'DocMine.UI' — 메인 GUI. 일반적인 개발/디버그 진입점.
-  // 'HwpWorker (stdin 수동)' — HwpWorker.exe 단독 실행, integratedTerminal 에 직접
-  //                           JSON 한 줄 타이핑해 응답 확인. STDIO 프로토콜 검증용.
+  // 'DocMine.UI' — 메인 GUI 모드 (args 없음).
+  // 'HwpWorker (stdin 수동)' — 같은 python.exe 를 --hwp-worker 모드로 실행,
+  //                           integratedTerminal 에 직접 JSON 한 줄 타이핑해
+  //                           응답 확인. STDIO 프로토콜 단독 검증용.
   //                           종료: `{"op":"quit"}` 또는 Ctrl+Z, Enter.
   "version": "0.2.0",
   "configurations": [
@@ -23,9 +24,9 @@
       "name": "HwpWorker (stdin 수동)",
       "type": "coreclr",
       "request": "launch",
-      "preLaunchTask": "build:HwpWorker",
-      "program": "${workspaceFolder}/src/DocMine.HwpWorker/bin/Debug/net8.0-windows/win-x64/DocMine.HwpWorker.exe",
-      "args": [],
+      "preLaunchTask": "build:UI",
+      "program": "${workspaceFolder}/src/DocMine.UI/bin/Debug/net8.0-windows/win-x64/python.exe",
+      "args": ["--hwp-worker"],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "stopAtEntry": false
@@ -34,9 +35,9 @@
       "name": "HwpWorker (--keep-hwp)",
       "type": "coreclr",
       "request": "launch",
-      "preLaunchTask": "build:HwpWorker",
-      "program": "${workspaceFolder}/src/DocMine.HwpWorker/bin/Debug/net8.0-windows/win-x64/DocMine.HwpWorker.exe",
-      "args": ["--keep-hwp"],
+      "preLaunchTask": "build:UI",
+      "program": "${workspaceFolder}/src/DocMine.UI/bin/Debug/net8.0-windows/win-x64/python.exe",
+      "args": ["--hwp-worker", "--keep-hwp"],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "stopAtEntry": false

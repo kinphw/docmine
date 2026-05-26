@@ -1,15 +1,19 @@
 // PDF 배치 파싱 → MariaDB — Python pdf_inserter.run 의 1:1 포팅.
 //
-// 설계 메모 (Python 판과 동일 의도):
-//   - 본문 텍스트 추출은 CPU-바운드 → Parallel.ForEachAsync 로 병렬 파싱.
-//     (Python 의 mp.Pool.imap_unordered 등가)
-//   - 메인 스레드는 결과 채널을 받아 DB INSERT 만 수행(직렬, 단일 커넥션).
-//   - 본문이 빈 PDF(스캔본/이미지) 는 parse_status='empty' 로 표기 —
-//     진짜 파싱 실패('error') 와 명시적으로 구분.
-//   - 사전 점검(파일 존재, DB skip) 은 직렬로 — 워커 spawn 비용 절약.
-//   - stop_event 등가는 CancellationToken — 메인 루프와 워커 둘 다 받음.
+// 설계 (Python 판과 동등한 *프로세스* 격리):
+//   - PdfPig 가 매니지드라도 큰/손상된 PDF 에서 OOM/AccessViolation 시 process
+//     통째 종료. Parallel.ForEachAsync (thread 격리) 로는 메인 GUI 까지 silent
+//     종료되는 회귀 발견.  Python mp.Pool 처럼 워커 *프로세스* N개 spawn 으로
+//     완전 격리 — 한 워커가 죽어도 메인 + 다른 워커 살아남고 새 워커 spawn.
+//   - 메인 = 코디네이터. 각 워커 = "한 작업씩 받아 응답" 의 STDIO JSON 루프.
+//   - 작업은 라운드로빈으로 N 워커에 분배. 각 워커는 자기 큐를 직렬 처리.
+//   - 한 워커 crash 시 새 워커 spawn 후 그 워커는 자기 남은 작업 계속.
+//   - 메인은 결과 채널을 받아 DB INSERT 만 (직렬, 단일 커넥션).
+//   - 본문이 빈 PDF 는 parse_status='empty' — 진짜 error 와 구분.
 
+using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json;
 using DocMine.Core.Config;
 using DocMine.Core.Db;
 using DocMine.Core.Pdf;
@@ -31,6 +35,7 @@ public sealed class PdfInsertRunner
 {
     private readonly AppConfig _cfg;
     private readonly DocumentRepository _repo;
+    private readonly string _workerExePath;
 
     // 본문이 비어 있을 때의 메시지 — 'error' 가 아니라 'empty' 상태로 기록.
     private const string EmptyTextMsg = "본문 텍스트 없음 (스캔본/이미지 PDF — OCR 미적용)";
@@ -44,10 +49,19 @@ ON DUPLICATE KEY UPDATE
     body_text=VALUES(body_text), parse_status=VALUES(parse_status),
     error_msg=VALUES(error_msg), parsed_at=CURRENT_TIMESTAMP";
 
+    private static readonly JsonSerializerOptions JsonOpts = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
     public PdfInsertRunner(AppConfig cfg)
     {
         _cfg = cfg;
         _repo = new DocumentRepository(cfg);
+        // 워커는 자기 자신(python.exe) 을 --pdf-worker 모드로 재실행.
+        _workerExePath = Environment.ProcessPath
+            ?? throw new InvalidOperationException("Environment.ProcessPath null — PDF 워커 spawn 불가");
     }
 
     /// <summary>
@@ -126,12 +140,17 @@ ON DUPLICATE KEY UPDATE
 
         var workers = Math.Max(1, Math.Min(AppConfig.PdfWorkers, tasks.Count));
         var cpu = Environment.ProcessorCount;
-        onLog?.Invoke($"  PDF 파서 워커 {workers}개로 병렬 파싱 (논리 CPU {cpu}개)…");
+        onLog?.Invoke($"  PDF 파서 워커 프로세스 {workers}개로 병렬 파싱 (논리 CPU {cpu}개)…");
 
-        // 워커가 결과를 던지는 채널. 메인 루프가 await 로 받아 직렬 INSERT.
+        // 작업을 워커 수로 라운드로빈 분배 — 각 워커 = 자기 큐를 직렬 처리.
+        var queues = new List<List<(int Idx, string Path, CsvRow Row)>>();
+        for (int i = 0; i < workers; i++) queues.Add(new List<(int, string, CsvRow)>());
+        for (int i = 0; i < tasks.Count; i++) queues[i % workers].Add(tasks[i]);
+
+        // 결과 채널 — 모든 워커가 push, 메인 INSERT 루프가 직렬 pull.
         var channel = System.Threading.Channels.Channel.CreateUnbounded<WorkerResult>();
 
-        // 메인 INSERT 루프 — 채널 읽으면서 진행.
+        // 메인 INSERT 루프.
         var insertTask = Task.Run(async () =>
         {
             await foreach (var r in channel.Reader.ReadAllAsync(cancellationToken))
@@ -147,39 +166,73 @@ ON DUPLICATE KEY UPDATE
             }
         }, cancellationToken);
 
-        // 워커 — Parallel.ForEachAsync.
-        var parallelOpts = new ParallelOptions
+        // 워커별 처리 task — N 개 동시 실행.
+        var workerTasks = queues.Select((queue, idx) => Task.Run(async () =>
         {
-            MaxDegreeOfParallelism = workers,
-            CancellationToken = cancellationToken,
-        };
+            Process? worker = StartPdfWorker(onLog, idx);
+            try
+            {
+                foreach (var t in queue)
+                {
+                    if (cancellationToken.IsCancellationRequested) break;
+
+                    // 워커 죽었으면 새로 spawn.
+                    if (worker is null || worker.HasExited)
+                    {
+                        if (worker is not null)
+                        {
+                            onLog?.Invoke($"\n  [worker {idx}] 죽음 감지 — 새 워커 spawn");
+                            try { worker.Dispose(); } catch { }
+                        }
+                        worker = StartPdfWorker(onLog, idx);
+                    }
+
+                    CrashTrace($"[{t.Idx}] >>> {t.Path}");
+                    WorkerResult result;
+                    try
+                    {
+                        var req = new { op = "parse", idx = t.Idx, path = t.Path };
+                        var reqJson = JsonSerializer.Serialize(req, JsonOpts);
+                        await worker.StandardInput.WriteLineAsync(reqJson);
+                        await worker.StandardInput.FlushAsync();
+
+                        var line = await worker.StandardOutput.ReadLineAsync(cancellationToken);
+                        if (line is null)
+                            throw new IOException("워커 stdout EOF — 처리 중 죽음 (큰 PDF 의 OOM 가능성)");
+                        var resp = JsonSerializer.Deserialize<WorkerResponse>(line, JsonOpts)!;
+                        result = new WorkerResult(t.Row, resp.Status, resp.Text, resp.Err);
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        // 워커 crash 또는 통신 오류 — 이 작업은 error 처리, 다음 작업 위해 새 워커 spawn.
+                        var msg = $"워커 crash: {ex.Message}";
+                        if (msg.Length > 900) msg = msg[..900];
+                        result = new WorkerResult(t.Row, "error", null, msg);
+                        try { if (worker is not null && !worker.HasExited) worker.Kill(entireProcessTree: true); } catch { }
+                        try { worker?.Dispose(); } catch { }
+                        worker = null;
+                    }
+                    CrashTrace($"[{t.Idx}] <<< {result.Status}");
+                    await channel.Writer.WriteAsync(result, cancellationToken);
+                }
+            }
+            finally
+            {
+                // 정상 종료 — quit 보내고 응답 대기, 안 되면 kill.
+                if (worker is not null && !worker.HasExited)
+                {
+                    try { await worker.StandardInput.WriteLineAsync("{\"op\":\"quit\"}"); await worker.StandardInput.FlushAsync(); } catch { }
+                    try { worker.WaitForExit(2000); } catch { }
+                    try { if (!worker.HasExited) worker.Kill(entireProcessTree: true); } catch { }
+                }
+                try { worker?.Dispose(); } catch { }
+            }
+        }, cancellationToken)).ToList();
+
         try
         {
-            await Parallel.ForEachAsync(tasks, parallelOpts, async (t, ct) =>
-            {
-                ct.ThrowIfCancellationRequested();
-                string? text = null;
-                string status = "success";
-                string? errMsg = null;
-                try
-                {
-                    text = PdfTextExtractor.Extract(t.Path);
-                    if (string.IsNullOrEmpty(text))
-                    {
-                        status = "empty";
-                        text = null;
-                        errMsg = EmptyTextMsg;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    status = "error";
-                    text = null;
-                    errMsg = Truncate(ex.Message, 900);
-                }
-                await channel.Writer.WriteAsync(
-                    new WorkerResult(t.Row, status, text, errMsg), ct);
-            });
+            await Task.WhenAll(workerTasks);
         }
         catch (OperationCanceledException)
         {
@@ -215,6 +268,44 @@ ON DUPLICATE KEY UPDATE
     }
 
     private record WorkerResult(CsvRow Row, string Status, string? Text, string? ErrMsg);
+    private sealed record WorkerResponse(int Idx, string Status, string? Text, string? Err);
+
+    /// <summary>같은 binary 를 --pdf-worker 모드로 spawn. stdin/stdout/stderr pipe redirect.</summary>
+    private Process StartPdfWorker(Action<string>? onLog, int workerIdx)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = _workerExePath,
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            StandardInputEncoding = System.Text.Encoding.UTF8,
+            StandardOutputEncoding = System.Text.Encoding.UTF8,
+            StandardErrorEncoding = System.Text.Encoding.UTF8,
+            WorkingDirectory = Path.GetDirectoryName(_workerExePath),
+        };
+        psi.ArgumentList.Add("--pdf-worker");
+
+        var p = Process.Start(psi) ?? throw new InvalidOperationException("PdfWorker spawn 실패");
+
+        // stderr 흡수 → 부모 로그.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                string? line;
+                while ((line = await p.StandardError.ReadLineAsync()) is not null)
+                {
+                    if (!string.IsNullOrWhiteSpace(line))
+                        onLog?.Invoke($"  [pdf-worker {workerIdx}] {line}");
+                }
+            }
+            catch { }
+        });
+        return p;
+    }
 
     // ─ CSV / DB 헬퍼는 CsvIngestHelpers.cs 로 이동 (HWP/PDF 공유) ────
 
@@ -251,6 +342,29 @@ ON DUPLICATE KEY UPDATE
 
     private static string Truncate(string s, int max)
         => s.Length <= max ? s : s[..max];
+
+    // ─ Crash trace — silent crash 시 마지막 처리 파일 추적 ─────────
+    //
+    // PdfPig 가 특정 PDF 에서 native-level access violation 등으로 process 통째
+    // 종료되면 try/catch 가 못 잡고 UI 메시지도 못 띄움. 그 경우 이 로그의
+    // ">>> " 로 끝난 마지막 줄이 죽인 파일.  운영 중 박건영님이 crash 후 확인.
+    //
+    // 8 worker 동시 호출이라 lock 으로 직렬화. WriteAllText 가 매번 flush.
+    private const string CrashLogFile = "pdf_crash_trace.log";
+    private static readonly object CrashLogLock = new();
+
+    private static void CrashTrace(string msg)
+    {
+        try
+        {
+            lock (CrashLogLock)
+            {
+                File.AppendAllText(CrashLogFile,
+                    $"{DateTime.Now:HH:mm:ss.fff} {msg}{Environment.NewLine}");
+            }
+        }
+        catch { /* 진단 로그가 실패해도 본 동작에 영향 없게 */ }
+    }
 
     // ─ 통계 ──────────────────────────────────────────────────────────
     private sealed class Stats

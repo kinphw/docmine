@@ -1,22 +1,26 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    DocMine.UI — WinForms GUI 진입점. unified_gui.py 등가.
+    DocMine.UI — 단일 진입점 (Python pythonw.exe + mp.Process 패턴 1:1).
 
     ★ AssemblyName=python — DRM 화이트리스트 우회 필수.
       운영환경 DRM 솔루션(Fasoo·MarkAny 등) 이 프로세스 basename 으로
       파일 I/O 허용 여부를 판정하므로, 발행 산출물 이름이 정확히
-      'python.exe' 여야 PDF 등 파일 접근이 허용됨. Python 판이 PyInstaller
-      에서 name='python' 으로 빌드하는 이유와 동일.
+      'python.exe' 여야 PDF 등 파일 접근이 허용됨.
 
-    publish 옵션은 csproj 에 박아둠 — 호출 시점에 -p:... 반복 없음.
-      FDD (기본, 가장 가벼움):
+    단일 binary 다중 인스턴스:
+      ㆍ args 없음 / GUI args ⇒ MainForm (WinForms)
+      ㆍ args == "[hyphen][hyphen]hwp-worker" ⇒ HwpWorkerEntry.Run (콘솔 STDIO 루프)
+      Python 의 mp.Process(worker_main) 가 같은 인터프리터 바이너리를
+      spawn 하는 패턴과 동일. 산출 파일은 python.exe 한 개로 모든 역할.
+
+    publish 옵션:
+      FDD (.NET 8 런타임 가정, 가장 가벼움):
         dotnet publish -c Release -p:SelfContained=false
-      자체포함 (.NET 8 Runtime 없는 PC 용):
+      자체포함 (런타임 없는 PC 용):
         dotnet publish -c Release -p:SelfContained=true -p:EnableCompressionInSingleFile=true
 
-    PublishTrimmed 는 사용 불가 — WinForms + dynamic COM (HwpFrame.HwpObject)
-    이 트리밍과 비호환. Forge 와 동일 제약.
+    PublishTrimmed 는 사용 불가 (WinForms + dynamic COM 비호환).
   -->
 
   <PropertyGroup>
@@ -32,41 +36,6 @@
   <ItemGroup>
     <ProjectReference Include="..\DocMine.Core\DocMine.Core.csproj" />
     <ProjectReference Include="..\DocMine.Win32\DocMine.Win32.csproj" />
-    <!-- HwpWorker — build 산출물은 자동 복사(개발 편의), publish 는 별도 target 처리. -->
-    <ProjectReference Include="..\DocMine.HwpWorker\DocMine.HwpWorker.csproj">
-      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
-      <OutputItemType>Content</OutputItemType>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Private>true</Private>
-    </ProjectReference>
   </ItemGroup>
-
-  <!--
-    AfterPublish — UI publish 후 HwpWorker 도 자동 publish 후 단일 exe 만 같은 폴더로 복사.
-    이렇게 해야 박건영님이 'dotnet publish DocMine.UI...' 한 번으로 publish 폴더에
-    python.exe + DocMine.HwpWorker.exe 두 파일이 같이 떨어짐.
-
-    HwpWorker 는 PublishSingleFile=true 로 자체 단일 exe. 임시 폴더에 publish 후
-    exe 만 옮기고 dependencies (.deps.json/.runtimeconfig.json) 는 삭제 — 단일 exe 가
-    그 메타데이터를 내부에 가지고 있어 불필요.
-
-    SelfContained 는 UI 와 동일하게 전파 — FDD/SelfContained 일치 보장.
-  -->
-  <Target Name="PublishHwpWorker" AfterTargets="Publish">
-    <PropertyGroup>
-      <_HwpWorkerProj>$(MSBuildThisFileDirectory)..\DocMine.HwpWorker\DocMine.HwpWorker.csproj</_HwpWorkerProj>
-      <_HwpStageDir>$(PublishDir)__hwp_stage\</_HwpStageDir>
-      <_HwpSelfContained Condition=" '$(SelfContained)' == '' ">false</_HwpSelfContained>
-      <_HwpSelfContained Condition=" '$(SelfContained)' != '' ">$(SelfContained)</_HwpSelfContained>
-    </PropertyGroup>
-    <Exec Command="dotnet publish &quot;$(_HwpWorkerProj)&quot; -c $(Configuration) -p:SelfContained=$(_HwpSelfContained) --nologo -o &quot;$(_HwpStageDir)&quot;" />
-    <ItemGroup>
-      <_HwpWorkerExe Include="$(_HwpStageDir)DocMine.HwpWorker.exe" />
-    </ItemGroup>
-    <Copy SourceFiles="@(_HwpWorkerExe)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
-    <RemoveDir Directories="$(_HwpStageDir)" />
-    <!-- AfterPublish 가 한 번 더 끼어드는 부수 산출물 정리. -->
-    <Delete Files="$(PublishDir)DocMine.HwpWorker.deps.json;$(PublishDir)DocMine.HwpWorker.runtimeconfig.json" />
-  </Target>
 
 </Project>

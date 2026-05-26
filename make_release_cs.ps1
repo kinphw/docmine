@@ -7,10 +7,10 @@
 #
 # 수행:
 #   1. Directory.Build.props 에서 <Version> 읽기
-#   2. dotnet publish DocMine.UI (FDD, single file)
-#      → AfterPublish target 이 HwpWorker.exe 도 같은 폴더에 추가
-#   3. release/docmine_v<버전>/ 에 stage: python.exe + DocMine.HwpWorker.exe + README.md
-#   4. release/docmine-cs_v<버전>.zip 으로 압축
+#   2. dotnet publish DocMine.UI (FDD, single file) — 단일 python.exe
+#      (HwpWorker 는 별도 binary 없음. python.exe 가 --hwp-worker 모드로 자가 spawn)
+#   3. release/docmine_v<버전>/ 에 stage: python.exe + README.md
+#   4. release/docmine_v<버전>.zip 으로 압축
 #
 # 배포 zip 사용법:
 #   - zip 풀고 python.exe 더블클릭 = 끝
@@ -46,22 +46,17 @@ if (-not $SkipBuild) {
 
 # 3) 검증 ─────────────────────────────────────────────────────────
 $pythonExe   = Join-Path $PublishDir 'python.exe'
-$workerExe   = Join-Path $PublishDir 'DocMine.HwpWorker.exe'
 if (-not (Test-Path $pythonExe)) { throw "산출물 없음: $pythonExe" }
-if (-not (Test-Path $workerExe)) { throw "산출물 없음: $workerExe" }
 $pythonSize = [math]::Round((Get-Item $pythonExe).Length / 1MB, 2)
-$workerSize = [math]::Round((Get-Item $workerExe).Length / 1MB, 2)
-Write-Host "  python.exe              : $pythonSize MB"
-Write-Host "  DocMine.HwpWorker.exe   : $workerSize MB"
+Write-Host "  python.exe : $pythonSize MB"
 
 # 4) stage 디렉토리 구성 ────────────────────────────────────────
-$stageName = "docmine-cs_v$version"
+$stageName = "docmine_v$version"
 $stageDir  = Join-Path $ReleaseRoot $stageName
 if (Test-Path $stageDir) { Remove-Item -Recurse -Force $stageDir }
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 
 Copy-Item $pythonExe $stageDir
-Copy-Item $workerExe $stageDir
 
 # 동봉 문서 — 운영 환경 사용 가이드.
 $readme = @"
@@ -74,8 +69,9 @@ $readme = @"
 4. 기존 ``.env`` 가 있으면 자동 마이그레이션됨
 
 ## 폴더 안 파일
-- ``python.exe``              메인 GUI 진입점
-- ``DocMine.HwpWorker.exe``   HWP COM 워커 (python.exe 가 자동 spawn)
+- ``python.exe``    유일한 binary (GUI + HWP 워커 모드 통합)
+                    HWP 적재/추출 시 자기 자신을 --hwp-worker 모드로 자동 spawn
+                    (Python mp.Process 패턴 1:1)
 
 ## 요구 환경
 - Windows 10/11 x64

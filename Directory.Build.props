@@ -37,6 +37,10 @@
     <FileVersion>$(Version).0</FileVersion>
     <AssemblyVersion>$(Version).0</AssemblyVersion>
     <InformationalVersion>$(Version)</InformationalVersion>
+    <!-- .NET SDK 가 build 시 git commit hash 를 InformationalVersion 에
+         자동 append (예: "0.5.0+ccc7930...") 하는 동작 끄기. About 다이얼로그에
+         깔끔하게 "0.5.0" 만 표시. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Product>DocMine</Product>
     <Company>kinphw</Company>
     <Copyright>Copyright (c) 2026 kinphw</Copyright>

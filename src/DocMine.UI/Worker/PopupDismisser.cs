@@ -4,20 +4,24 @@
 // 동작: 300ms 주기로 모든 top-level window 순회 → 자식 Button 검사 →
 //      라벨이 BTNS 리스트와 일치하면 BM_CLICK 전송.
 //
+// "상위 버전에서 작성한 문서입니다" 팝업은 한컴 자체 DUI 라 EnumChildWindows
+// 로 button 을 못 잡음 — HwpComExtractor.Extract 의 Open args 에
+// "versionwarning:false" 로 차단 (한컴 공식 답변).  여기는 그 외 일반 팝업용.
+//
 // 안전성: COM 호출 스레드와 별개로 떠 있어도 영향 없음 (UI 메시지 전송만).
-//        HwpWorker.exe 가 종료되면 ct 가 cancel 되어 루프 빠져나옴.
+//        워커 인스턴스가 종료되면 ct 가 cancel 되어 루프 빠져나옴.
 
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace DocMine.HwpWorker;
+namespace DocMine.UI.Worker;
 
 internal static class PopupDismisser
 {
     private const uint BM_CLICK = 0xF5;
 
     // 한/글 보안 팝업의 한국어 + 영문 버튼 라벨.
-    // & 표기는 alt-shortcut — 실제 텍스트에 포함됨 (Windows API 가 underscore 로 변환 안 함).
+    // & 는 alt-shortcut 표기 — 실제 텍스트에 포함됨 (Windows API 가 underscore 변환 안 함).
     private static readonly string[] Buttons =
     {
         "접근 허용(&A)", "접근 허용",
@@ -34,7 +38,7 @@ internal static class PopupDismisser
             while (!ct.IsCancellationRequested)
             {
                 try { EnumWindows(OnWindow, IntPtr.Zero); }
-                catch { /* shutdown 시점의 race 무시 */ }
+                catch { /* shutdown race 무시 */ }
                 try { await Task.Delay(300, ct); }
                 catch (OperationCanceledException) { break; }
             }
@@ -67,7 +71,7 @@ internal static class PopupDismisser
                 if (t.Contains(b, StringComparison.Ordinal))
                 {
                     SendMessage(hwnd, BM_CLICK, IntPtr.Zero, IntPtr.Zero);
-                    break;
+                    return false;  // 같은 dialog 의 첫 매치 후 child enum 중단
                 }
             }
         }

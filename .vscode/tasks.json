@@ -11,7 +11,7 @@
       "args": ["build", "${workspaceFolder}/DocMine.sln", "-v", "minimal"],
       "problemMatcher": "$msCompile",
       "group": { "kind": "build", "isDefault": true },
-      "detail": "전체 솔루션 Debug 빌드 (HwpWorker.exe 자동 복사)"
+      "detail": "전체 솔루션 Debug 빌드 (단일 python.exe)"
     },
     {
       "label": "build:UI",
@@ -20,14 +20,6 @@
       "args": ["build", "${workspaceFolder}/src/DocMine.UI/DocMine.UI.csproj", "-v", "minimal"],
       "problemMatcher": "$msCompile",
       "detail": "UI 단독 빌드 (의존 자동 포함)"
-    },
-    {
-      "label": "build:HwpWorker",
-      "type": "process",
-      "command": "dotnet",
-      "args": ["build", "${workspaceFolder}/src/DocMine.HwpWorker/DocMine.HwpWorker.csproj", "-v", "minimal"],
-      "problemMatcher": "$msCompile",
-      "detail": "HwpWorker 단독 빌드 (COM/STDIO 디버그용)"
     },
     {
       "label": "build:Core",
@@ -56,7 +48,7 @@
         "-p:SelfContained=false"
       ],
       "problemMatcher": "$msCompile",
-      "detail": ".NET 8 런타임 가정. AfterPublish target 이 HwpWorker.exe 동봉"
+      "detail": ".NET 8 런타임 가정. 단일 python.exe 산출"
     },
     {
       "label": "release:zip",

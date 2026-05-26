@@ -1,0 +1,106 @@
+// PdfWorker 모드 진입점 — Python multiprocessing.Pool(_extract_pdf_worker) 등가.
+//
+// 같은 python.exe 가 args 에 따라 세 모드로 분기:
+//   - args 없음 / GUI args  → MainForm
+//   - args == --hwp-worker  → HwpWorkerEntry.Run
+//   - args == --pdf-worker  → PdfWorkerEntry.Run    (이 파일)
+//
+// 왜 별도 워커 프로세스인가:
+//   PdfPig 가 매니지드 코드라도 큰/손상된 PDF 처리 시 OOM 또는 native-level
+//   abort 가능 — Parallel.ForEachAsync 의 thread 격리는 같은 프로세스라 한
+//   thread 가 죽으면 메인 GUI 까지 silent 종료. Python mp.Pool 처럼 프로세스
+//   격리해야 한 워커가 죽어도 메인 + 다른 워커 살아남고 새 워커 spawn 으로 회복.
+//
+// STDIO 프로토콜 (line-delimited JSON) — HwpWorker 와 동일 스타일:
+//   IN  : {"op":"parse","idx":N,"path":"..."}
+//         {"op":"quit"}
+//   OUT : {"idx":N,"status":"success|empty|error","text":"...","err":null}
+//
+// 한 워커 = 한 작업씩 직렬. 병렬은 메인이 워커 N개 spawn 으로 처리.
+
+using System.Text;
+using System.Text.Json;
+using DocMine.Core.Pdf;
+
+namespace DocMine.UI.Worker;
+
+internal static class PdfWorkerEntry
+{
+    private const string EmptyTextMsg = "본문 텍스트 없음 (스캔본/이미지 PDF — OCR 미적용)";
+
+    public static int Run(string[] args)
+    {
+        // WinExe 라 콘솔 없음 — pipe 위에 UTF-8 wrapper 직접 부착 (HwpWorker 와 동일).
+        var utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), utf8) { AutoFlush = true });
+        Console.SetError(new StreamWriter(Console.OpenStandardError(), utf8) { AutoFlush = true });
+        Console.SetIn(new StreamReader(Console.OpenStandardInput(), utf8));
+
+        Console.Error.WriteLine($"[PdfWorker] ready (PID={Environment.ProcessId})");
+
+        string? line;
+        while ((line = Console.In.ReadLine()) is not null)
+        {
+            line = line.Trim();
+            if (line.Length == 0) continue;
+
+            ParseRequest req;
+            try
+            {
+                req = JsonSerializer.Deserialize<ParseRequest>(line, JsonOpts)!;
+            }
+            catch (Exception ex)
+            {
+                WriteResponse(new ParseResponse(-1, "error", null, $"잘못된 요청: {ex.Message}"));
+                continue;
+            }
+
+            if (req.Op == "quit")
+            {
+                Console.Error.WriteLine("[PdfWorker] quit received");
+                break;
+            }
+            if (req.Op != "parse")
+            {
+                WriteResponse(new ParseResponse(req.Idx, "error", null, $"알 수 없는 op: {req.Op}"));
+                continue;
+            }
+
+            ParseResponse resp;
+            try
+            {
+                var text = PdfTextExtractor.Extract(req.Path);
+                if (string.IsNullOrEmpty(text))
+                    resp = new ParseResponse(req.Idx, "empty", null, EmptyTextMsg);
+                else
+                    resp = new ParseResponse(req.Idx, "success", text, null);
+            }
+            catch (Exception ex)
+            {
+                var msg = ex.Message;
+                if (msg.Length > 900) msg = msg[..900];
+                resp = new ParseResponse(req.Idx, "error", null, msg);
+            }
+            WriteResponse(resp);
+        }
+
+        Console.Error.WriteLine("[PdfWorker] exit");
+        return 0;
+    }
+
+    private static readonly JsonSerializerOptions JsonOpts = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
+    private static void WriteResponse(ParseResponse resp)
+    {
+        var json = JsonSerializer.Serialize(resp, JsonOpts);
+        Console.Out.WriteLine(json);
+        Console.Out.Flush();
+    }
+
+    private sealed record ParseRequest(string Op, int Idx, string Path);
+    private sealed record ParseResponse(int Idx, string Status, string? Text, string? Err);
+}

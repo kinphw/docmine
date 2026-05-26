@@ -8,7 +8,7 @@ using System.Net;
 using System.Text.RegularExpressions;
 using System.Runtime.InteropServices;
 
-namespace DocMine.HwpWorker;
+namespace DocMine.UI.Worker;
 
 internal sealed class HwpComExtractor : IDisposable
 {
@@ -31,8 +31,11 @@ internal sealed class HwpComExtractor : IDisposable
         try { hwp.SetMessageBoxMode(0x10000); } catch { }
 
         // DispatchEx(late-bind)는 optional 파라미터 디폴트가 안 채워지므로 3-arg 명시.
-        // "forceopen:true" — 손상/경고 파일도 강제로.
-        hwp.Open(Path.GetFullPath(filePath), "", "forceopen:true");
+        // Open args (한컴 공식 — ';' 구분):
+        //   - forceopen:true        손상/경고 파일도 강제 열기
+        //   - versionwarning:false  "상위 버전에서 작성한 문서입니다" 팝업 차단
+        //                           (한컴 공식 답변 bhjung@hancom 2023.11)
+        hwp.Open(Path.GetFullPath(filePath), "", "forceopen:true;versionwarning:false");
 
         string text = "";
         try

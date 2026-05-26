@@ -10,7 +10,7 @@ using DocMine.Win32;
 
 namespace DocMine.UI.Tabs;
 
-public sealed class ScanTab : TabPage
+public sealed class ScanTab : TabPage, IBusyTab
 {
     public enum Scope { Hwp, Pdf }
 
@@ -260,4 +260,8 @@ public sealed class ScanTab : TabPage
             _cts = null;
         }
     }
+
+    // ─ IBusyTab ─────────────────────────────────────────────────────
+    public bool IsBusy => _cts is not null;
+    public void RequestStop() => _cts?.Cancel();
 }

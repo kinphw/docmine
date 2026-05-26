@@ -9,7 +9,7 @@ using DocMine.Core.Pipeline;
 
 namespace DocMine.UI.Tabs;
 
-public sealed class PdfInsertTab : TabPage
+public sealed class PdfInsertTab : TabPage, IBusyTab
 {
     private readonly TextBox _csvBox;
     private readonly TextBox _startBox;
@@ -205,4 +205,8 @@ public sealed class PdfInsertTab : TabPage
         n = Math.Clamp(n, 0, width);
         return new string('#', n) + new string('.', width - n);
     }
+
+    // ─ IBusyTab ─────────────────────────────────────────────────────
+    public bool IsBusy => _busy;
+    public void RequestStop() => OnStop();
 }

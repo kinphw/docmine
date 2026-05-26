@@ -54,21 +54,10 @@ ON DUPLICATE KEY UPDATE
         _repo = new DocumentRepository(cfg);
         _keepHwp = keepHwp;
 
-        // HwpWorker.exe — UI 와 같은 폴더에 publish 된다는 가정.
-        var baseDir = AppContext.BaseDirectory;
-        var candidate1 = Path.Combine(baseDir, "DocMine.HwpWorker.exe");
-        if (File.Exists(candidate1)) { _workerExePath = candidate1; return; }
-
-        // Debug 빌드 시: 개발 환경에서는 형제 디렉토리에 있음.
-        var devCandidate = Path.GetFullPath(Path.Combine(baseDir,
-            "..", "..", "..", "..", "DocMine.HwpWorker", "bin", "Debug",
-            "net8.0-windows", "win-x64", "DocMine.HwpWorker.exe"));
-        if (File.Exists(devCandidate)) { _workerExePath = devCandidate; return; }
-
-        throw new FileNotFoundException(
-            $"DocMine.HwpWorker.exe 를 찾을 수 없습니다.\n" +
-            $"  찾은 경로 1: {candidate1}\n" +
-            $"  찾은 경로 2: {devCandidate}");
+        // 워커는 자기 자신(python.exe) 을 --hwp-worker 모드로 재실행.
+        // Python mp.Process 가 같은 인터프리터 바이너리를 spawn 하는 패턴 1:1.
+        _workerExePath = Environment.ProcessPath
+            ?? throw new InvalidOperationException("Environment.ProcessPath null — 워커 spawn 불가");
     }
 
     public async Task<int> RunAsync(
@@ -256,6 +245,8 @@ ON DUPLICATE KEY UPDATE
             StandardErrorEncoding = System.Text.Encoding.UTF8,
             WorkingDirectory = Path.GetDirectoryName(_workerExePath),
         };
+        // 같은 binary 재실행 → --hwp-worker 모드 진입.
+        psi.ArgumentList.Add("--hwp-worker");
         if (_keepHwp) psi.ArgumentList.Add("--keep-hwp");
 
         var p = Process.Start(psi)

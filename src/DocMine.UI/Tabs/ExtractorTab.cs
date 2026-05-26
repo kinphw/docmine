@@ -15,7 +15,7 @@ using DocMine.Core.Pdf;
 
 namespace DocMine.UI.Tabs;
 
-public sealed class ExtractorTab : TabPage
+public sealed class ExtractorTab : TabPage, IBusyTab
 {
     private static readonly HashSet<string> HwpExts = new(StringComparer.OrdinalIgnoreCase) { ".hwp", ".hwpx" };
     private static readonly HashSet<string> PdfExts = new(StringComparer.OrdinalIgnoreCase) { ".pdf" };
@@ -25,10 +25,12 @@ public sealed class ExtractorTab : TabPage
     private readonly CheckBox _hwpBox, _pdfBox;
     private readonly TextBox _srcBox, _dstBox;
     private readonly Button _srcBrowseBtn, _dstBrowseBtn;
-    private readonly Button _startBtn, _stopBtn;
+    private readonly Button _startBtn, _stopBtn, _openOutBtn;
+    private readonly ProgressBar _progBar;
     private readonly LogPane _log;
     private CancellationTokenSource? _cts;
     private bool _busy;
+    private string? _lastOutputPath;
 
     // 사용자가 dst 를 직접 편집/선택했는지 — false 일 때만 src/mode 변경 시 dst 자동 갱신.
     private bool _dstIsAuto = true;
@@ -84,12 +86,18 @@ public sealed class ExtractorTab : TabPage
 
         // 버튼
         var btnRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(0, 6, 0, 6) };
-        _startBtn = new Button { Text = "추출 시작", AutoSize = true };
-        _stopBtn  = new Button { Text = "중지",      AutoSize = true, Enabled = false, Margin = new Padding(6, 0, 0, 0) };
-        _startBtn.Click += async (_, _) => await StartAsync();
-        _stopBtn.Click  += (_, _) => OnStop();
+        _startBtn   = new Button { Text = "추출 시작",  AutoSize = true };
+        _stopBtn    = new Button { Text = "중지",       AutoSize = true, Enabled = false, Margin = new Padding(6, 0, 0, 0) };
+        _openOutBtn = new Button { Text = "산출물 열기", AutoSize = true, Enabled = false, Margin = new Padding(6, 0, 0, 0) };
+        _startBtn.Click   += async (_, _) => await StartAsync();
+        _stopBtn.Click    += (_, _) => OnStop();
+        _openOutBtn.Click += (_, _) => OpenLastOutput();
         btnRow.Controls.Add(_startBtn);
         btnRow.Controls.Add(_stopBtn);
+        btnRow.Controls.Add(_openOutBtn);
+
+        // 진행률 막대
+        _progBar = new ProgressBar { Dock = DockStyle.Top, Height = 14, Margin = new Padding(0, 4, 0, 4), Style = ProgressBarStyle.Continuous };
 
         _log = new LogPane { Dock = DockStyle.Fill };
         var logFrame = new GroupBox { Text = "로그", Dock = DockStyle.Fill, Padding = new Padding(4) };
@@ -97,8 +105,9 @@ public sealed class ExtractorTab : TabPage
 
         var root = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Padding = new Padding(8),
+            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, Padding = new Padding(8),
         };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -110,7 +119,8 @@ public sealed class ExtractorTab : TabPage
         root.Controls.Add(srcGroup, 0, 2);
         root.Controls.Add(dstGroup, 0, 3);
         root.Controls.Add(btnRow, 0, 4);
-        root.Controls.Add(logFrame, 0, 5);
+        root.Controls.Add(_progBar, 0, 5);
+        root.Controls.Add(logFrame, 0, 6);
 
         Controls.Add(root);
     }
@@ -214,6 +224,10 @@ public sealed class ExtractorTab : TabPage
         _startBtn.Text = "추출 중…";
         _stopBtn.Enabled = true;
         _stopBtn.Text = "중지";
+        _openOutBtn.Enabled = false;
+        _progBar.Value = 0;
+        _progBar.Maximum = files.Count;
+        _lastOutputPath = null;
         _log.Clear();
         _log.AppendLine($"  입력: {files.Count}건");
         _log.AppendLine($"  출력: {dst}");
@@ -222,10 +236,15 @@ public sealed class ExtractorTab : TabPage
         {
             await Task.Run(() => Extract(files, dst, _cts.Token), _cts.Token);
             _log.AppendLine($"\n  ✓ 완료 — {dst}");
+            _lastOutputPath = dst;
+            _openOutBtn.Enabled = File.Exists(dst);
         }
         catch (OperationCanceledException)
         {
             _log.AppendLine("\n  중단됨.");
+            // 중단됐어도 일부 결과는 저장됐을 수 있으므로 산출물 열기 enable.
+            _lastOutputPath = dst;
+            _openOutBtn.Enabled = File.Exists(dst);
         }
         catch (Exception ex)
         {
@@ -241,6 +260,13 @@ public sealed class ExtractorTab : TabPage
             _cts?.Dispose();
             _cts = null;
         }
+    }
+
+    private void OpenLastOutput()
+    {
+        if (string.IsNullOrEmpty(_lastOutputPath) || !File.Exists(_lastOutputPath)) return;
+        try { Process.Start(new ProcessStartInfo(_lastOutputPath) { UseShellExecute = true }); }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "열기 실패"); }
     }
 
     private void OnStop()
@@ -315,6 +341,7 @@ public sealed class ExtractorTab : TabPage
                 w.WriteLine();
                 w.Flush();
                 done++;
+                UpdateProgress(done);
             }
             _log.AppendLine($"\n  처리 {done}/{files.Count}건  ({sw.Elapsed.TotalSeconds:F1}초)");
         }
@@ -332,15 +359,9 @@ public sealed class ExtractorTab : TabPage
 
     private static Process StartHwpWorker(out Task? stderrTask)
     {
-        var baseDir = AppContext.BaseDirectory;
-        var workerPath = Path.Combine(baseDir, "DocMine.HwpWorker.exe");
-        if (!File.Exists(workerPath))
-        {
-            // 개발 환경 fallback.
-            workerPath = Path.GetFullPath(Path.Combine(baseDir,
-                "..", "..", "..", "..", "DocMine.HwpWorker", "bin", "Debug",
-                "net8.0-windows", "win-x64", "DocMine.HwpWorker.exe"));
-        }
+        // 자기 자신(python.exe) 을 워커 모드로 재실행.
+        var workerPath = Environment.ProcessPath
+            ?? throw new InvalidOperationException("Environment.ProcessPath null — 워커 spawn 불가");
         var psi = new ProcessStartInfo
         {
             FileName = workerPath,
@@ -353,6 +374,7 @@ public sealed class ExtractorTab : TabPage
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
+        psi.ArgumentList.Add("--hwp-worker");
         // 추출기에서는 외부 한/글 보호.
         psi.ArgumentList.Add("--keep-hwp");
 
@@ -391,4 +413,14 @@ public sealed class ExtractorTab : TabPage
     }
 
     private sealed record Resp(int Idx, string Status, string? Text, string? Err);
+
+    private void UpdateProgress(int done)
+    {
+        if (_progBar.InvokeRequired) { _progBar.BeginInvoke(() => UpdateProgress(done)); return; }
+        _progBar.Value = Math.Min(done, _progBar.Maximum);
+    }
+
+    // ─ IBusyTab ─────────────────────────────────────────────────────
+    public bool IsBusy => _busy;
+    public void RequestStop() => OnStop();
 }
