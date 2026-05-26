@@ -85,14 +85,28 @@ $readme = @"
 ## 진단 (PDF 적재 silent crash 발생 시)
 1. 작업 폴더의 ``pdf_crash_trace.log`` 마지막 ``>>>`` 줄 확인 → 죽인 파일의
    path / size / feat (JBIG2/JPX/ENC/XFA/FORM) / producer 메타 확인.
-2. Windows Error Reporting 자동 덤프 활성화 (관리자 cmd, 운영 PC 1회):
+
+2. (선택) Windows Error Reporting 자동 덤프 ON — 운영 PC 1회 설정.
+   한 번 설정하면 그 후 ``python.exe`` 비정상 종료마다 자동 dump 생성됨.
+   진단 후엔 OFF 권장 (계속 dump 쌓이는 것 방지).
+
+   **ON** — 관리자 cmd:
 ``````
 reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" /v DumpFolder /t REG_EXPAND_SZ /d "%LOCALAPPDATA%\CrashDumps" /f
-reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" /v DumpType /t REG_DWORD /d 2 /f
+reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" /v DumpType /t REG_DWORD /d 1 /f
 ``````
-   crash 후 ``%LOCALAPPDATA%\CrashDumps\python.exe.*.dmp`` 가 생성됨.
-   덤프의 faulting module 이 ``f_sps.dll`` → Fasoo DRM 충돌,
-   ``coreclr.dll`` → .NET OOM/StackOverflow.
+   ``DumpType=1`` = mini dump (~수 MB, faulting module 확인엔 충분).
+   ``DumpType=2`` = full memory dump (~GB, full heap 검사 필요할 때만).
+
+   crash 후 ``%LOCALAPPDATA%\CrashDumps\python.exe.*.dmp`` 자동 생성.
+   덤프를 Visual Studio 또는 WinDbg 로 열어 "faulting module" 확인:
+     ``f_sps.dll`` (또는 ``mksys*``, ``fsv*``) → Fasoo/MarkAny DRM 충돌
+     ``coreclr.dll`` → .NET OOM/StackOverflow (PdfPig 한계)
+
+   **OFF** — 분류 끝난 후 관리자 cmd:
+``````
+reg delete "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe" /f
+``````
 
 ## 빌드
 ``pwsh -File make_release_cs.ps1``
