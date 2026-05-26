@@ -290,17 +290,18 @@ ON DUPLICATE KEY UPDATE
 
         var p = Process.Start(psi) ?? throw new InvalidOperationException("PdfWorker spawn 실패");
 
-        // stderr 흡수 → 부모 로그.
+        // stderr 흡수 — buffer 가 차서 deadlock 안 되도록 반드시 읽되, MuPDF 의 broken-PDF
+        // repair warning 이 워커당 다수 발생하므로 LogPane 으로 흘리면 UI thread 가 막혀
+        // 메인 INSERT 루프까지 느려짐. 첫 줄(ready 메시지) 만 보여주고 나머지는 폐기.
         _ = Task.Run(async () =>
         {
             try
             {
-                string? line;
-                while ((line = await p.StandardError.ReadLineAsync()) is not null)
-                {
-                    if (!string.IsNullOrWhiteSpace(line))
-                        onLog?.Invoke($"  [pdf-worker {workerIdx}] {line}");
-                }
+                var first = await p.StandardError.ReadLineAsync();
+                if (!string.IsNullOrWhiteSpace(first))
+                    onLog?.Invoke($"  [pdf-worker {workerIdx}] {first}");
+                // 나머지 stderr 는 buffer 비움 — 출력 안 함.
+                await p.StandardError.ReadToEndAsync();
             }
             catch { }
         });
