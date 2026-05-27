@@ -111,9 +111,8 @@ public sealed class SettingsTab : TabPage
         var tuneContainer = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1 };
         var tuneHint = new Label
         {
-            Text = $"PDF 워커 프로세스 수 (0 = 자동, default = min(코어, {AppConfig.PdfWorkersDefaultCap}))\n" +
-                   "12+ 코어 PC + 다른 작업 동시 진행 시 12 worker spawn 이 메인 GUI 를\n" +
-                   "죽이는 회귀가 있어 명시 권장. 보수적: 2~4, 적극: 8.",
+            Text = "PDF 워커 프로세스 수 (0 = 자동: 논리 CPU 수).\n" +
+                   "메모리 압박/silent crash 시 보수적으로 줄임 (예: 2~4).",
             ForeColor = Color.Gray, AutoSize = true, Margin = new Padding(0, 0, 0, 4),
         };
         var tuneRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
