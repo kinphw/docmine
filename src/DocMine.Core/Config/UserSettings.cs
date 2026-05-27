@@ -30,6 +30,11 @@ public sealed class UserSettingsData
     // 등록된 경로의 하위 트리는 enumerate 자체를 안 함 (재귀 prune).
     // 예: C:\Users\<user>\OneDrive 추가 시 동기화 폴더 전부 skip.
     public List<string> ScanExcludeDirs { get; set; } = new();
+
+    // PDF 워커 프로세스 수. 0 = 자동 (min(논리 CPU, 4)).
+    // 12+ 코어 PC 에서 코어수 그대로 spawn 하면 메모리 압박으로 메인 GUI 가
+    // 죽는 회귀 있음 → 명시 안 하면 보수적 4 cap. 사용자가 환경 보고 조정.
+    public int PdfWorkers { get; set; } = 0;
 }
 
 public static class UserSettings
