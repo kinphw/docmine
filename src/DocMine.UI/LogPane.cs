@@ -55,9 +55,12 @@ public sealed class LogPane : UserControl
     /// <summary>새 줄 추가 (\n 등가). 라이브 라인 마크가 텍스트 끝으로 이동.</summary>
     public void AppendLine(string text)
     {
-        WriteToMirror(text);
-
+        // BeginInvoke 가 AppendLine 을 재귀 호출하므로 WriteToMirror 가 두 번
+        // 호출되어 mirror file 에 중복 기록되는 버그가 있었음. UI thread 진입 후
+        // 한 번만 호출하도록 InvokeRequired 분기를 먼저.
         if (InvokeRequired) { BeginInvoke(() => AppendLine(text)); return; }
+
+        WriteToMirror(text);
 
         // 기존 라이브 라인을 확정한 뒤 줄바꿈.
         ReplaceLiveRegion(text + Environment.NewLine);

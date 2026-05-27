@@ -19,7 +19,12 @@
 
   <ItemGroup>
     <PackageReference Include="MySqlConnector" Version="2.3.7" />
-    <PackageReference Include="PdfPig" Version="0.1.14" />
+    <!-- MuPDFCore — PyMuPDF 와 동엔진 (MuPDF C 코어). 운영 환경 한국 PDF
+         (한컴 export, 큰 파일) 호환성을 위해 PdfPig 에서 전환.
+         PdfPig 가 GetWords() 의 OOM (#820) 및 한국 PDF strict parser 한계로
+         운영 PC silent crash 재현 — MuPDF 의 강건한 native parser 채택. -->
+    <PackageReference Include="MuPDFCore" Version="2.0.1" />
+    <PackageReference Include="MuPDFCore.NativeAssets.Win-x64" Version="2.0.1" />
   </ItemGroup>
 
 </Project>
