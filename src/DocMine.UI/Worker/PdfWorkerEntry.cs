@@ -28,6 +28,13 @@ internal static class PdfWorkerEntry
 {
     private const string EmptyTextMsg = "본문 텍스트 없음 (스캔본/이미지 PDF — OCR 미적용)";
 
+    // 본문 안전 상한 (문자 수) — *정상* 문서를 자르려는 게 아니다. 손상/악성 PDF 가
+    // 추출 단계에서 폭주해 수백 MB~GB 텍스트를 토해내는 경우만 막는 가드.
+    // 3천만 자(≈1만 쪽)는 어떤 정상 문서보다도 크므로 실문서는 절대 절단되지 않는다.
+    // DB max_allowed_packet 기준 절단은 메인(PdfInsertRunner)이 별도로 처리하고,
+    // 자를 땐 로그로 명시한다.
+    private const int MaxBodyChars = 30_000_000;
+
     public static int Run(string[] args)
     {
         // WinExe 라 콘솔 없음 — pipe 위에 UTF-8 wrapper 직접 부착 (HwpWorker 와 동일).
@@ -71,9 +78,18 @@ internal static class PdfWorkerEntry
             {
                 var text = PdfTextExtractor.Extract(req.Path);
                 if (string.IsNullOrEmpty(text))
+                {
                     resp = new ParseResponse(req.Idx, "empty", null, EmptyTextMsg);
+                }
                 else
+                {
+                    if (text.Length > MaxBodyChars)
+                    {
+                        Console.Error.WriteLine($"[PdfWorker] 비정상적으로 긴 추출 {text.Length:N0}자 — 손상 PDF 의심, {MaxBodyChars:N0}자로 절단");
+                        text = text[..MaxBodyChars] + "\n…[비정상적으로 긴 추출 — 손상 PDF 의심, 상한 절단]";
+                    }
                     resp = new ParseResponse(req.Idx, "success", text, null);
+                }
             }
             catch (Exception ex)
             {

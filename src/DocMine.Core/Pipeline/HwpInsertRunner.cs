@@ -96,7 +96,7 @@ ON DUPLICATE KEY UPDATE
         for (int i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
-            if (knownKeys.Contains((row.Directory, row.Filename))) continue;
+            if (knownKeys.Contains(CsvIngestHelpers.NormKey(row.Directory, row.Filename))) continue;
             toProcess.Add((start + i, row));
         }
         var skipCount = rows.Count - toProcess.Count;

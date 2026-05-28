@@ -73,23 +73,44 @@ public static class CsvIngestHelpers
         return result;
     }
 
-    /// <summary>(directory, filename) chunked lookup — 이미 DB 에 있는 행은 skip.</summary>
+    /// <summary>
+    /// (directory, filename) skip-키 정규화.
+    ///
+    /// 스캔 CSV 의 문자열과 DB 적재본의 문자열이 Unicode 정규화형(NFC/NFD)·
+    /// 대소문자·앞뒤 공백에서 어긋나면, 같은 파일인데도 ordinal 비교로는 다른 키가
+    /// 되어 skip 에 실패한다(특히 OneDrive 한글 경로). 그 한 건만 재파싱·재전송되어
+    /// 거대 본문 OOM 으로 메인 GUI 가 silent 종료되던 운영 환경 크래시의 시발점.
+    ///   - NFC 통일 (Windows 파일 시스템은 보통 NFC)
+    ///   - 앞뒤 공백 제거
+    ///   - 대소문자 무시 (Windows 경로는 case-insensitive)
+    /// </summary>
+    public static (string, string) NormKey(string directory, string filename)
+    {
+        static string N(string s) => (s ?? string.Empty)
+            .Normalize(System.Text.NormalizationForm.FormC)
+            .Trim()
+            .ToLowerInvariant();
+        return (N(directory), N(filename));
+    }
+
+    /// <summary>(directory, filename) chunked lookup — 이미 DB 에 있는 행은 skip.
+    /// 반환 집합은 <see cref="NormKey"/> 로 정규화된 키. 호출부도 NormKey 로 비교할 것.</summary>
     public static HashSet<(string, string)> LoadExistingKeys(
         AppConfig cfg, DocumentRepository repo, List<CsvRow> rows)
     {
-        var keys = rows
+        var candidates = rows
             .Where(r => !string.IsNullOrEmpty(r.Directory) && !string.IsNullOrEmpty(r.Filename))
             .Select(r => (r.Directory, r.Filename))
-            .ToHashSet();
-        if (keys.Count == 0) return keys;
-
+            .Distinct()
+            .ToList();
         var existing = new HashSet<(string, string)>();
+        if (candidates.Count == 0) return existing;
+
         const int chunkSize = 500;
-        var keyList = keys.ToList();
         using var conn = repo.OpenConnection();
-        for (var i = 0; i < keyList.Count; i += chunkSize)
+        for (var i = 0; i < candidates.Count; i += chunkSize)
         {
-            var chunk = keyList.Skip(i).Take(chunkSize).ToList();
+            var chunk = candidates.Skip(i).Take(chunkSize).ToList();
             var placeholders = string.Join(", ", chunk.Select((_, j) => $"(@d{j}, @f{j})"));
             using var cmd = conn.CreateCommand();
             cmd.CommandText =
@@ -97,12 +118,15 @@ public static class CsvIngestHelpers
                 $"WHERE (directory, filename) IN ({placeholders})";
             for (var j = 0; j < chunk.Count; j++)
             {
-                cmd.Parameters.AddWithValue($"@d{j}", chunk[j].Directory);
-                cmd.Parameters.AddWithValue($"@f{j}", chunk[j].Filename);
+                // NFC 로 정규화해 보냄 — NFC 로 적재된 DB 행과 매칭 (NFD 스캔 결과 보정).
+                cmd.Parameters.AddWithValue($"@d{j}",
+                    chunk[j].Directory.Normalize(System.Text.NormalizationForm.FormC));
+                cmd.Parameters.AddWithValue($"@f{j}",
+                    chunk[j].Filename.Normalize(System.Text.NormalizationForm.FormC));
             }
             using var rdr = cmd.ExecuteReader();
             while (rdr.Read())
-                existing.Add((rdr.GetString(0), rdr.GetString(1)));
+                existing.Add(NormKey(rdr.GetString(0), rdr.GetString(1)));
         }
         return existing;
     }

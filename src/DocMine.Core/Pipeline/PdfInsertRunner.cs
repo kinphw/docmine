@@ -14,7 +14,6 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using DocMine.Core.Config;
 using DocMine.Core.Db;
 using DocMine.Core.Pdf;
@@ -37,6 +36,11 @@ public sealed class PdfInsertRunner
     private readonly AppConfig _cfg;
     private readonly DocumentRepository _repo;
     private readonly string _workerExePath;
+
+    // 본문 INSERT 시 허용 byte 예산 — 서버 max_allowed_packet 에서 산출 (RunAsync 에서 설정).
+    // 이걸 넘으면 INSERT 자체가 실패하므로, 넘는 문서는 '잘라서라도' 색인 (전무보다 부분이 나음).
+    private long _bodyByteBudget = 16L * 1024 * 1024;
+    private Action<string>? _onLog;
 
     // 본문이 비어 있을 때의 메시지 — 'error' 가 아니라 'empty' 상태로 기록.
     private const string EmptyTextMsg = "본문 텍스트 없음 (스캔본/이미지 PDF — OCR 미적용)";
@@ -78,6 +82,7 @@ ON DUPLICATE KEY UPDATE
         Action<PdfInsertProgress>? onProgress = null,
         CancellationToken cancellationToken = default)
     {
+        _onLog = onLog;
         // JobObject 셋업은 UI 진입점(Program.Main) 에서 한 번 처리 — 여기선 무관.
         var allRows = CsvIngestHelpers.LoadCsv(csvPath);
         var pdfRows = allRows
@@ -108,7 +113,7 @@ ON DUPLICATE KEY UPDATE
         for (var i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
-            if (knownKeys.Contains((row.Directory, row.Filename)))
+            if (knownKeys.Contains(CsvIngestHelpers.NormKey(row.Directory, row.Filename)))
                 continue;  // skip 대상 — 아래서 bulk 카운트
             toProcess.Add((start + i, row));
         }
@@ -125,6 +130,7 @@ ON DUPLICATE KEY UPDATE
         var pendingCommit = 0;
 
         await using var conn = _repo.OpenConnection();
+        _bodyByteBudget = QueryPacketBudget(conn, onLog);
         await using var errLogStream = new StreamWriter(
             "pdf_parse_errors.csv", append: true,
             new System.Text.UTF8Encoding(true));
@@ -160,7 +166,15 @@ ON DUPLICATE KEY UPDATE
         for (int i = 0; i < tasks.Count; i++) queues[i % workers].Add(tasks[i]);
 
         // 결과 채널 — 모든 워커가 push, 메인 INSERT 루프가 직렬 pull.
-        var channel = System.Threading.Channels.Channel.CreateUnbounded<WorkerResult>();
+        // Bounded — 워커(병렬)가 직렬·단일커넥션 INSERT 보다 빨리 큰 본문 결과를 쌓으면
+        // unbounded 큐가 메모리를 무한 점유 → OOM(메인 GUI silent 종료). 워커 수의 2배로
+        // 제한해 큐가 차면 WriteAsync 가 대기(backpressure) — 워커가 INSERT 속도에 맞춰짐.
+        var channel = System.Threading.Channels.Channel.CreateBounded<WorkerResult>(
+            new System.Threading.Channels.BoundedChannelOptions(Math.Max(4, workers * 2))
+            {
+                FullMode = System.Threading.Channels.BoundedChannelFullMode.Wait,
+                SingleReader = true,
+            });
 
         // 메인 INSERT 루프.
         var insertTask = Task.Run(async () =>
@@ -170,7 +184,11 @@ ON DUPLICATE KEY UPDATE
                 if (cancellationToken.IsCancellationRequested) break;
                 if (!string.IsNullOrEmpty(r.ErrMsg) && r.Status != "empty")
                     await WriteErrAsync(errLogStream, r.Row, r.ErrMsg!);
+                // INSERT 직전/직후를 추적 — silent crash 시 마지막 줄이 'INS >>>' 면
+                // 그 본문 길이(len)에서 INSERT 중 죽은 것 (거대 본문 OOM/패킷 초과 분류용).
+                CrashTrace($"INS >>> {r.Row.Filename}  status={r.Status} len={(r.Text?.Length ?? 0):N0}");
                 await InsertAsync(conn, r.Row, r.Text, r.Status, r.ErrMsg);
+                CrashTrace($"INS <<< {r.Row.Filename}  ok");
                 pendingCommit++;
                 stats.Tick(r.Status);
                 onProgress?.Invoke(stats.Snapshot());
@@ -199,7 +217,7 @@ ON DUPLICATE KEY UPDATE
                         worker = StartPdfWorker(onLog, idx);
                     }
 
-                    CrashTrace($"[{t.Idx}] >>> {t.Path}  {SniffPdf(t.Path)}");
+                    CrashTrace($"[{t.Idx}] >>> {t.Path}  {SniffSize(t.Row.SizeBytes)}");
                     WorkerResult result;
                     try
                     {
@@ -333,12 +351,53 @@ ON DUPLICATE KEY UPDATE
             cmd.Parameters.AddWithValue("@ext", row.Extension.ToLowerInvariant());
             cmd.Parameters.AddWithValue("@sz", row.SizeBytes);
             cmd.Parameters.AddWithValue("@mt", row.Modified);
-            cmd.Parameters.AddWithValue("@body", (object?)text ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@body", (object?)FitBody(text, row.Filename) ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@status", status);
             cmd.Parameters.AddWithValue("@err", (object?)errMsg ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync();
         }
-        catch (Exception) { /* 진행 막지 않음 — 에러 로그는 별도 */ }
+        catch (Exception ex)
+        {
+            // 진행은 막지 않되, 왜 INSERT 가 조용히 실패했는지는 남긴다
+            // (예: max_allowed_packet 초과, 교착, 컬럼 길이 초과).
+            CrashTrace($"INS FAIL {row.Filename}: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>서버 max_allowed_packet 조회 → 본문 byte 예산 산출 (다른 컬럼+프로토콜 여유 차감).</summary>
+    private static long QueryPacketBudget(MySqlConnection conn, Action<string>? onLog)
+    {
+        long maxPacket = 16L * 1024 * 1024;
+        try
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT @@max_allowed_packet";
+            maxPacket = Convert.ToInt64(cmd.ExecuteScalar());
+        }
+        catch { /* 조회 실패 시 보수적 16MB 가정 */ }
+
+        var budget = Math.Max(256 * 1024, maxPacket - 512 * 1024);  // 512KB 여유
+        onLog?.Invoke($"  서버 max_allowed_packet ≈ {maxPacket / 1024.0 / 1024.0:F0}MB → 본문 상한 {budget / 1024.0 / 1024.0:F0}MB");
+        if (maxPacket <= 16L * 1024 * 1024)
+            onLog?.Invoke("  (큰 문서 전체를 색인하려면 서버 max_allowed_packet 상향 권장: 예 256M)");
+        return budget;
+    }
+
+    /// <summary>
+    /// 본문을 max_allowed_packet 예산 이내로 맞춤. 예산 안이면 원문 그대로 — 정상/긴 문서는
+    /// 절대 손대지 않는다. 초과 시에만 잘라 '부분 색인'하고 로그로 명시 (INSERT 통째 실패 회피).
+    /// </summary>
+    private string? FitBody(string? text, string filename)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        if (System.Text.Encoding.UTF8.GetByteCount(text) <= _bodyByteBudget) return text;  // 대부분 여기
+
+        // UTF-8 최악 4 byte/문자 가정으로 자르면 반드시 예산 이내.
+        var keep = (int)Math.Min(text.Length, _bodyByteBudget / 4);
+        var cut = text[..keep] + "\n…[DB max_allowed_packet 한계로 본문 일부만 색인됨]";
+        _onLog?.Invoke($"  ⚠ 본문 절단(패킷 한계): {filename} — {text.Length:N0}자 중 {keep:N0}자만 색인 (서버 max_allowed_packet 상향 시 전체 색인 가능)");
+        CrashTrace($"BODY TRUNCATED {filename}: {text.Length:N0} chars > budget {_bodyByteBudget:N0}B");
+        return cut;
     }
 
     private static async Task WriteErrAsync(StreamWriter w, CsvRow row, string msg)
@@ -379,67 +438,21 @@ ON DUPLICATE KEY UPDATE
         catch { /* 진단 로그가 실패해도 본 동작에 영향 없게 */ }
     }
 
-    // ─ PDF 파일 사전 스니프 — silent crash 원인 분류용 ───────────────
+    // ─ 트레이스용 크기 표기 — 파일 시스템 접근 0 ────────────────────
     //
-    // PdfPig 호출 *전에* 메인이 파일 첫/끝 16KB 만 읽어 위험 신호 검출.
-    // 워커가 죽으면 pdf_crash_trace.log 의 마지막 ">>>" 줄에 이 메타가
-    // 남아 박건영님이 즉시 분류 가능:
-    //   - size 큼 + feat=[]            → PdfPig OOM (#820) 의심
-    //   - feat=[JBIG2,JPX]            → PdfPig 미지원 filter
-    //   - feat=[ENC]                  → 암호화 PDF
-    //   - producer=Hancom             → HWP export, malformed xref 가능성
-    //   - producer=Fasoo Watermark    → DRM 처리 흔적
-    //
-    // sniff 자체가 죽지 않도록 catch-all. PdfPig 호출 0 — 순수 byte read.
-
-    private static readonly Regex ProducerRe = new(
-        @"/Producer\s*\(([^)]{0,128})\)", RegexOptions.Compiled);
-
-    private static string SniffPdf(string path)
-    {
-        try
-        {
-            var fi = new FileInfo(path);
-            var sizeBytes = fi.Length;
-            var sizeStr = sizeBytes >= 1024 * 1024
-                ? $"{sizeBytes / 1024.0 / 1024.0:F1}MB"
-                : $"{sizeBytes / 1024.0:F0}KB";
-
-            using var fs = File.OpenRead(path);
-            var headLen = (int)Math.Min(16384, sizeBytes);
-            var headBuf = new byte[headLen];
-            fs.ReadExactly(headBuf);
-            var head = System.Text.Encoding.ASCII.GetString(headBuf);
-
-            var tail = "";
-            if (sizeBytes > 32768)
-            {
-                var tailBuf = new byte[16384];
-                fs.Position = sizeBytes - tailBuf.Length;
-                fs.ReadExactly(tailBuf);
-                tail = System.Text.Encoding.ASCII.GetString(tailBuf);
-            }
-            var combined = head + tail;
-
-            var flags = new List<string>();
-            if (combined.Contains("/JBIG2Decode")) flags.Add("JBIG2");
-            if (combined.Contains("/JPXDecode"))   flags.Add("JPX");
-            if (combined.Contains("/Encrypt"))     flags.Add("ENC");
-            if (combined.Contains("/XFA"))         flags.Add("XFA");
-            if (combined.Contains("/AcroForm"))    flags.Add("FORM");
-
-            string producer = "";
-            var m = ProducerRe.Match(combined);
-            if (m.Success) producer = $" producer='{m.Groups[1].Value.Trim()}'";
-
-            var featStr = flags.Count > 0 ? $" feat=[{string.Join(",", flags)}]" : "";
-            return $"size={sizeStr}{featStr}{producer}";
-        }
-        catch (Exception ex)
-        {
-            return $"sniff-failed: {ex.GetType().Name}";
-        }
-    }
+    // 과거엔 메인이 파싱 전 SniffPdf 로 파일 첫/끝 16KB 를 raw byte 로 읽어
+    // producer/필터를 분류했다. 그러나 DRM(Fasoo 등) 환경에서 **메인 프로세스가
+    // 보호 파일의 raw 바이트를 읽고 tail 로 seek 하는 행위**가 DLP/추출방지의
+    // 횟수 임계에 걸려 N 번째 파일에서 프로세스가 강제 종료(GUI silent 증발)되는
+    // 것으로 강하게 의심된다. (전체 CSV 는 게이지 N 에서 죽고, 그 부분집합만 돌리면
+    // 정상인 패턴 = 파일 *내용*이 아니라 raw read *횟수*가 변수라는 뜻.)
+    // Python 코디네이터엔 이런 raw read 가 없었고 crash 도 없었다.
+    //   → 메인은 파일을 일절 열지 않는다. 크기는 스캔 CSV 가 이미 수집한 값을 사용.
+    //     (실제 본문 read 는 격리된 워커 프로세스의 iText 에서만 발생.)
+    private static string SniffSize(long sizeBytes)
+        => sizeBytes >= 1024 * 1024
+            ? $"size={sizeBytes / 1024.0 / 1024.0:F1}MB"
+            : $"size={sizeBytes / 1024.0:F0}KB";
 
     // ─ 통계 ──────────────────────────────────────────────────────────
     private sealed class Stats

@@ -25,3 +25,5 @@ obj/
 publish/
 *.user
 .vs/
+
+*.pdf
