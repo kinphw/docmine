@@ -161,7 +161,9 @@ public sealed class HwpInsertTab : TabPage, IBusyTab
         try
         {
             var runner = new HwpInsertRunner(cfg, keepHwp: _keepHwpBox.Checked);
-            await runner.RunAsync(
+            // background thread — UI thread 독점 + onProgress BeginInvoke 폭주 회피.
+            var token = _cts.Token;
+            await Task.Run(() => runner.RunAsync(
                 csv, start, end,
                 onLog: line => _log.AppendLine(line),
                 onProgress: p =>
@@ -172,7 +174,7 @@ public sealed class HwpInsertTab : TabPage, IBusyTab
                     var skip  = p.Skip  > 0 ? $" skip:{p.Skip}"   : "";
                     _log.UpdateLive($"  [{bar}] {p.Index}/{p.Total}  ok:{p.Ok} err:{p.Err}{crash}{skip}");
                 },
-                cancellationToken: _cts.Token);
+                cancellationToken: token), token);
         }
         catch (OperationCanceledException)
         {

@@ -100,9 +100,28 @@ ON DUPLICATE KEY UPDATE
         if (knownKeys.Count > 0)
             onLog?.Invoke($"  ✓ DB 기존 파일 {knownKeys.Count:N0}건은 파싱 없이 건너뜁니다.");
 
-        // ── 1) 사전 점검 (직렬) — DB skip / 파일 없음 ──
-        var tasks = new List<(int Idx, string Path, CsvRow Row)>();
+        // ── 1) skip 대상 bulk 제외 — DB 기존 파일은 한 번에 카운트 ──
+        // (예전엔 skip 수만 건을 루프 돌며 stats.Tick + onProgress 호출 → UI 메시지
+        //  큐 폭주로 메인 GUI 가 죽음. skip 은 통계만 필요하니 bulk 처리.)
         var stats = new Stats(rows.Count);
+        var toProcess = new List<(int Idx, CsvRow Row)>();
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            if (knownKeys.Contains((row.Directory, row.Filename)))
+                continue;  // skip 대상 — 아래서 bulk 카운트
+            toProcess.Add((start + i, row));
+        }
+        var skipCount = rows.Count - toProcess.Count;
+        if (skipCount > 0)
+        {
+            stats.TickSkipBulk(skipCount);
+            onProgress?.Invoke(stats.Snapshot());
+        }
+        onLog?.Invoke($"  처리 대상: {toProcess.Count:N0}건 (skip {skipCount:N0}건 제외)");
+
+        // ── 2) 처리 대상만 파일 존재 점검 ──
+        var tasks = new List<(int Idx, string Path, CsvRow Row)>();
         var pendingCommit = 0;
 
         await using var conn = _repo.OpenConnection();
@@ -110,18 +129,10 @@ ON DUPLICATE KEY UPDATE
             "pdf_parse_errors.csv", append: true,
             new System.Text.UTF8Encoding(true));
 
-        for (var i = 0; i < rows.Count; i++)
+        foreach (var (idx, row) in toProcess)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var row = rows[i];
             var fp = Path.Combine(row.Directory, row.Filename);
-
-            if (knownKeys.Contains((row.Directory, row.Filename)))
-            {
-                stats.Tick("skip");
-                onProgress?.Invoke(stats.Snapshot());
-                continue;
-            }
             if (!File.Exists(PdfTextExtractor.WinLongPath(fp)))
             {
                 await InsertAsync(conn, row, null, "error", "파일 없음");
@@ -132,7 +143,7 @@ ON DUPLICATE KEY UPDATE
                 if (pendingCommit >= AppConfig.CommitEvery) { conn.Close(); conn.Open(); pendingCommit = 0; }
                 continue;
             }
-            tasks.Add((i, fp, row));
+            tasks.Add((idx, fp, row));
         }
 
         // ── 2) 병렬 파싱 + 결과 채널 → 메인에서 INSERT ──
@@ -449,6 +460,9 @@ ON DUPLICATE KEY UPDATE
                 case "empty":   Empty++; break;
             }
         }
+
+        /// <summary>DB 기존 파일 skip 을 한 번에 카운트 — 개별 Tick + onProgress 폭주 회피.</summary>
+        public void TickSkipBulk(int n) { Cur += n; Skip += n; }
 
         public PdfInsertProgress Snapshot() => new(_total, Cur, Ok, Err, Skip, Empty);
 

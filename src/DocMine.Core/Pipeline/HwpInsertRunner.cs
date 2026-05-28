@@ -89,6 +89,30 @@ ON DUPLICATE KEY UPDATE
         if (knownKeys.Count > 0)
             onLog?.Invoke($"  ✓ DB 기존 파일 {knownKeys.Count:N0}건은 파싱 없이 건너뜁니다.");
 
+        var stats = new Stats(rows.Count);
+
+        // ── skip 대상 bulk 제외 — 개별 Tick + onProgress 폭주 회피 (PDF 와 동일) ──
+        var toProcess = new List<(int Idx, CsvRow Row)>();
+        for (int i = 0; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            if (knownKeys.Contains((row.Directory, row.Filename))) continue;
+            toProcess.Add((start + i, row));
+        }
+        var skipCount = rows.Count - toProcess.Count;
+        if (skipCount > 0)
+        {
+            stats.TickSkipBulk(skipCount);
+            onProgress?.Invoke(stats.Snapshot());
+        }
+        onLog?.Invoke($"  처리 대상: {toProcess.Count:N0}건 (skip {skipCount:N0}건 제외)");
+
+        if (toProcess.Count == 0)
+        {
+            onLog?.Invoke("  모든 파일이 이미 DB 에 있습니다 — 파싱 없이 종료.");
+            return 0;
+        }
+
         // 시작 시점에 이전 실행의 좀비 Hwp.exe 정리 (Python 패턴).
         HwpComExtractor_ProcessKill();
 
@@ -99,12 +123,11 @@ ON DUPLICATE KEY UPDATE
         var worker = StartWorker(onLog);
         onLog?.Invoke($"  ✓ 워커 프로세스 시작 (PID {worker.Process.Id})");
 
-        var stats = new Stats(rows.Count);
         var pending = 0;
 
         try
         {
-            for (int i = 0; i < rows.Count; i++)
+            foreach (var (globalIdx, row) in toProcess)
             {
                 if (cancellationToken.IsCancellationRequested)
                 {
@@ -112,15 +135,8 @@ ON DUPLICATE KEY UPDATE
                     break;
                 }
 
-                var row = rows[i];
                 var fp = Path.Combine(row.Directory, row.Filename);
 
-                if (knownKeys.Contains((row.Directory, row.Filename)))
-                {
-                    stats.Tick("skip");
-                    onProgress?.Invoke(stats.Snapshot());
-                    continue;
-                }
                 if (!File.Exists(fp))
                 {
                     await InsertAsync(conn, row, null, "error", "파일 없음");
@@ -144,7 +160,7 @@ ON DUPLICATE KEY UPDATE
                 }
 
                 // 워커에 요청 보내고 응답 대기.
-                var req = new { op = "parse", idx = start + i, path = fp, ext = row.Extension.ToLowerInvariant() };
+                var req = new { op = "parse", idx = globalIdx, path = fp, ext = row.Extension.ToLowerInvariant() };
                 var reqJson = JsonSerializer.Serialize(req, JsonOpts);
 
                 ParseResponse? resp;
@@ -160,7 +176,7 @@ ON DUPLICATE KEY UPDATE
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
-                    resp = new ParseResponse(start + i, "error", null, $"워커 통신 오류: {ex.Message}");
+                    resp = new ParseResponse(globalIdx, "error", null, $"워커 통신 오류: {ex.Message}");
                 }
 
                 if (resp is null)
@@ -172,7 +188,7 @@ ON DUPLICATE KEY UPDATE
                     worker.Dispose();
                     Thread.Sleep(1000);
                     worker = StartWorker(onLog);
-                    onLog?.Invoke($"\n  워커 재시작 (PID {worker.Process.Id}) — [{start + i}] {row.Filename}");
+                    onLog?.Invoke($"\n  워커 재시작 (PID {worker.Process.Id}) — [{globalIdx}] {row.Filename}");
 
                     await WriteErrAsync(errLog, row, errMsg);
                     await InsertAsync(conn, row, null, "error", errMsg);
@@ -365,6 +381,7 @@ ON DUPLICATE KEY UPDATE
                 case "crash":   Crash++; break;
             }
         }
+        public void TickSkipBulk(int n) { Cur += n; Skip += n; }
         public HwpInsertProgress Snapshot() => new(_total, Cur, Ok, Err, Skip, Crash);
         public string Summary()
         {

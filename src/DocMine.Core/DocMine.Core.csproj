@@ -19,12 +19,11 @@
 
   <ItemGroup>
     <PackageReference Include="MySqlConnector" Version="2.3.7" />
-    <!-- MuPDFCore — PyMuPDF 와 동엔진 (MuPDF C 코어). 운영 환경 한국 PDF
-         (한컴 export, 큰 파일) 호환성을 위해 PdfPig 에서 전환.
-         PdfPig 가 GetWords() 의 OOM (#820) 및 한국 PDF strict parser 한계로
-         운영 PC silent crash 재현 — MuPDF 의 강건한 native parser 채택. -->
-    <PackageReference Include="MuPDFCore" Version="2.0.1" />
-    <PackageReference Include="MuPDFCore.NativeAssets.Win-x64" Version="2.0.1" />
+    <!-- iText 9 (구 iText 7 계보) — Java 본진 20년+ 검증 + .NET port.
+         한국 금융권 자바 시스템 표준에 가까워 한컴 export / 손상 PDF 강건.
+         AGPL — 개인 사용 전제로 채택 (배포 시 라이선스 의무 발생).
+         MuPDFCore 29MB → iText 매니지드로 용량 축소 + silent crash 안정성 동시 시도. -->
+    <PackageReference Include="itext" Version="9.6.0" />
   </ItemGroup>
 
 </Project>

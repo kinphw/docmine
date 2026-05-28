@@ -159,10 +159,13 @@ public sealed class PdfInsertTab : TabPage, IBusyTab
         try
         {
             var runner = new PdfInsertRunner(cfg);
-            await runner.RunAsync(
+            // RunAsync 를 background thread 에서 — UI thread 에서 직접 시작하면
+            // 사전 점검 루프(skip 수만 건)가 await 없이 UI thread 를 독점하여
+            // onProgress 의 BeginInvoke 가 UI 메시지 큐에 폭주 → 메인 GUI 죽음.
+            var token = _cts.Token;
+            await Task.Run(() => runner.RunAsync(
                 csv, start, end,
                 onLog: line => _log.AppendLine(line),
-                // 진행은 \r 라이브 라인 — milestone 사이 살아있음 신호 + 통계.
                 onProgress: p =>
                 {
                     var pct = p.Total == 0 ? 100 : p.Index * 100.0 / p.Total;
@@ -171,7 +174,7 @@ public sealed class PdfInsertTab : TabPage, IBusyTab
                     var skip  = p.Skip  > 0 ? $" skip:{p.Skip}"   : "";
                     _log.UpdateLive($"  [{bar}] {p.Index}/{p.Total}  ok:{p.Ok} err:{p.Err}{empty}{skip}");
                 },
-                cancellationToken: _cts.Token);
+                cancellationToken: token), token);
         }
         catch (OperationCanceledException)
         {
