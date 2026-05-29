@@ -43,7 +43,11 @@ internal static class PdfWorkerEntry
         Console.SetError(new StreamWriter(Console.OpenStandardError(), utf8) { AutoFlush = true });
         Console.SetIn(new StreamReader(Console.OpenStandardInput(), utf8));
 
-        Console.Error.WriteLine($"[PdfWorker] ready (PID={Environment.ProcessId})");
+        // args[1] = 엔진명 ("iText"|"PdfPig"). 부모가 설정값을 전달 — run 중 일관성 보장.
+        var engineName = args.Length > 1 ? args[1] : PdfTextExtractor.DefaultEngine;
+        var engine = PdfTextExtractor.Create(engineName);
+
+        Console.Error.WriteLine($"[PdfWorker] ready (PID={Environment.ProcessId}, engine={engine.Name})");
 
         string? line;
         while ((line = Console.In.ReadLine()) is not null)
@@ -58,7 +62,7 @@ internal static class PdfWorkerEntry
             }
             catch (Exception ex)
             {
-                WriteResponse(new ParseResponse(-1, "error", null, $"잘못된 요청: {ex.Message}"));
+                WriteResponse(new ParseResponse(-1, "error", null, $"잘못된 요청: {ex.Message}", 0));
                 continue;
             }
 
@@ -69,17 +73,19 @@ internal static class PdfWorkerEntry
             }
             if (req.Op != "parse")
             {
-                WriteResponse(new ParseResponse(req.Idx, "error", null, $"알 수 없는 op: {req.Op}"));
+                WriteResponse(new ParseResponse(req.Idx, "error", null, $"알 수 없는 op: {req.Op}", 0));
                 continue;
             }
 
             ParseResponse resp;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
-                var text = PdfTextExtractor.Extract(req.Path);
+                var text = engine.Extract(req.Path);
+                sw.Stop();
                 if (string.IsNullOrEmpty(text))
                 {
-                    resp = new ParseResponse(req.Idx, "empty", null, EmptyTextMsg);
+                    resp = new ParseResponse(req.Idx, "empty", null, EmptyTextMsg, sw.ElapsedMilliseconds);
                 }
                 else
                 {
@@ -88,14 +94,15 @@ internal static class PdfWorkerEntry
                         Console.Error.WriteLine($"[PdfWorker] 비정상적으로 긴 추출 {text.Length:N0}자 — 손상 PDF 의심, {MaxBodyChars:N0}자로 절단");
                         text = text[..MaxBodyChars] + "\n…[비정상적으로 긴 추출 — 손상 PDF 의심, 상한 절단]";
                     }
-                    resp = new ParseResponse(req.Idx, "success", text, null);
+                    resp = new ParseResponse(req.Idx, "success", text, null, sw.ElapsedMilliseconds);
                 }
             }
             catch (Exception ex)
             {
+                sw.Stop();
                 var msg = ex.Message;
                 if (msg.Length > 900) msg = msg[..900];
-                resp = new ParseResponse(req.Idx, "error", null, msg);
+                resp = new ParseResponse(req.Idx, "error", null, msg, sw.ElapsedMilliseconds);
             }
             WriteResponse(resp);
         }
@@ -118,5 +125,5 @@ internal static class PdfWorkerEntry
     }
 
     private sealed record ParseRequest(string Op, int Idx, string Path);
-    private sealed record ParseResponse(int Idx, string Status, string? Text, string? Err);
+    private sealed record ParseResponse(int Idx, string Status, string? Text, string? Err, long ElapsedMs);
 }

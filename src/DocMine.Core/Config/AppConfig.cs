@@ -17,6 +17,7 @@ public sealed record AppConfig(
     string DbTable,
     IReadOnlyList<string> ScanExcludeDirs,
     int    PdfWorkersResolved,
+    string PdfEngine,
     string SettingsPath)
 {
     // ─ 하드코딩 상수 ─ 사용자가 바꿀 필요 없는 값들.
@@ -62,6 +63,7 @@ public sealed record AppConfig(
             DbTable:  data.DbTable,
             ScanExcludeDirs: data.ScanExcludeDirs.ToList(),
             PdfWorkersResolved: resolvedWorkers,
+            PdfEngine: string.IsNullOrWhiteSpace(data.PdfEngine) ? "iText" : data.PdfEngine.Trim(),
             SettingsPath: UserSettings.SettingsPath());
     }
 

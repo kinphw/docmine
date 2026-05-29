@@ -14,15 +14,16 @@
 
     의존:
       MySqlConnector — pymysql 대체 (async, MariaDB 호환, MIT)
-      PdfPig         — PyMuPDF 대체 (순수 매니지드, Apache 2.0)
+      PdfPig + iText — PDF 텍스트 추출 *두 엔진 동시 포함*. ⑤ 설정 탭에서 런타임 전환.
+                       성능/품질 비교 후 하나로 확정 예정.
   -->
 
   <ItemGroup>
     <PackageReference Include="MySqlConnector" Version="2.3.7" />
-    <!-- iText 9 (구 iText 7 계보) — Java 본진 20년+ 검증 + .NET port.
-         한국 금융권 자바 시스템 표준에 가까워 한컴 export / 손상 PDF 강건.
-         AGPL — 개인 사용 전제로 채택 (배포 시 라이선스 의무 발생).
-         MuPDFCore 29MB → iText 매니지드로 용량 축소 + silent crash 안정성 동시 시도. -->
+    <!-- PDF 엔진 2종 동시 포함 — 설정에서 전환해 A/B 비교.
+         PdfPig : 순수 매니지드, Apache 2.0 (라이선스 부담 없음, 용량 작음)
+         iText 9: Java 본진 이식, 손상 PDF 강건. AGPL (배포 시 의무 발생) -->
+    <PackageReference Include="PdfPig" Version="0.1.14" />
     <PackageReference Include="itext" Version="9.6.0" />
   </ItemGroup>
 

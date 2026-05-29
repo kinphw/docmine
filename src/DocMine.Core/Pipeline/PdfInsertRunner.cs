@@ -135,6 +135,9 @@ ON DUPLICATE KEY UPDATE
             "pdf_parse_errors.csv", append: true,
             new System.Text.UTF8Encoding(true));
 
+        // 성능 비교용 벽시계 — 파일 점검 + 파싱 + INSERT 전체 구간.
+        var wall = System.Diagnostics.Stopwatch.StartNew();
+
         foreach (var (idx, row) in toProcess)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -158,7 +161,7 @@ ON DUPLICATE KEY UPDATE
 
         var workers = Math.Max(1, Math.Min(AppConfig.PdfWorkers, tasks.Count));
         var cpu = Environment.ProcessorCount;
-        onLog?.Invoke($"  PDF 파서 워커 프로세스 {workers}개로 병렬 파싱 (논리 CPU {cpu}개)…");
+        onLog?.Invoke($"  PDF 엔진: {_cfg.PdfEngine}  |  파서 워커 {workers}개 병렬 (논리 CPU {cpu}개)…");
 
         // 작업을 워커 수로 라운드로빈 분배 — 각 워커 = 자기 큐를 직렬 처리.
         var queues = new List<List<(int Idx, string Path, CsvRow Row)>>();
@@ -191,6 +194,7 @@ ON DUPLICATE KEY UPDATE
                 CrashTrace($"INS <<< {r.Row.Filename}  ok");
                 pendingCommit++;
                 stats.Tick(r.Status);
+                stats.AddParse(r.ElapsedMs);
                 onProgress?.Invoke(stats.Snapshot());
                 if (pendingCommit >= AppConfig.CommitEvery) { conn.Close(); conn.Open(); pendingCommit = 0; }
             }
@@ -230,7 +234,7 @@ ON DUPLICATE KEY UPDATE
                         if (line is null)
                             throw new IOException("워커 stdout EOF — 처리 중 죽음 (큰 PDF 의 OOM 가능성)");
                         var resp = JsonSerializer.Deserialize<WorkerResponse>(line, JsonOpts)!;
-                        result = new WorkerResult(t.Row, resp.Status, resp.Text, resp.Err);
+                        result = new WorkerResult(t.Row, resp.Status, resp.Text, resp.Err, resp.ElapsedMs);
                     }
                     catch (OperationCanceledException) { throw; }
                     catch (Exception ex)
@@ -238,12 +242,12 @@ ON DUPLICATE KEY UPDATE
                         // 워커 crash 또는 통신 오류 — 이 작업은 error 처리, 다음 작업 위해 새 워커 spawn.
                         var msg = $"워커 crash: {ex.Message}";
                         if (msg.Length > 900) msg = msg[..900];
-                        result = new WorkerResult(t.Row, "error", null, msg);
+                        result = new WorkerResult(t.Row, "error", null, msg, 0);
                         try { if (worker is not null && !worker.HasExited) worker.Kill(entireProcessTree: true); } catch { }
                         try { worker?.Dispose(); } catch { }
                         worker = null;
                     }
-                    CrashTrace($"[{t.Idx}] <<< {result.Status}");
+                    CrashTrace($"[{t.Idx}] <<< {result.Status} {result.ElapsedMs}ms");
                     await channel.Writer.WriteAsync(result, cancellationToken);
                 }
             }
@@ -292,13 +296,24 @@ ON DUPLICATE KEY UPDATE
         catch (Exception ex) { onLog?.Invoke($"  [통계 조회 실패] {ex.Message}"); }
 
         onLog?.Invoke(stats.Summary());
+
+        // ── 성능 요약 (엔진 A/B 비교용) ──
+        wall.Stop();
+        var secs = wall.Elapsed.TotalSeconds;
+        var avgMs = stats.ParsedCount > 0 ? stats.TotalParseMs / (double)stats.ParsedCount : 0;
+        var thru = secs > 0 ? stats.ParsedCount / secs : 0;
+        onLog?.Invoke(
+            $"  [성능] 엔진={_cfg.PdfEngine}  벽시계={secs:F1}s  " +
+            $"파싱평균={avgMs:F0}ms/건  처리량={thru:F1}건/s  " +
+            $"(파싱 {stats.ParsedCount:N0}건, 파싱시간합 {stats.TotalParseMs:N0}ms)");
+
         onLog?.Invoke("  에러 로그: pdf_parse_errors.csv");
         onLog?.Invoke("  (스캔본/이미지 PDF 는 'empty' 로 분류 — 에러 아님)");
         return 0;
     }
 
-    private record WorkerResult(CsvRow Row, string Status, string? Text, string? ErrMsg);
-    private sealed record WorkerResponse(int Idx, string Status, string? Text, string? Err);
+    private record WorkerResult(CsvRow Row, string Status, string? Text, string? ErrMsg, long ElapsedMs);
+    private sealed record WorkerResponse(int Idx, string Status, string? Text, string? Err, long ElapsedMs);
 
     /// <summary>같은 binary 를 --pdf-worker 모드로 spawn. stdin/stdout/stderr pipe redirect.</summary>
     private Process StartPdfWorker(Action<string>? onLog, int workerIdx)
@@ -317,22 +332,15 @@ ON DUPLICATE KEY UPDATE
             WorkingDirectory = Path.GetDirectoryName(_workerExePath),
         };
         psi.ArgumentList.Add("--pdf-worker");
+        psi.ArgumentList.Add(_cfg.PdfEngine);   // 워커가 쓸 엔진 — run 중 일관성 보장
 
         var p = Process.Start(psi) ?? throw new InvalidOperationException("PdfWorker spawn 실패");
 
-        // stderr 흡수 — buffer 가 차서 deadlock 안 되도록 반드시 읽되, MuPDF 의 broken-PDF
-        // repair warning 이 워커당 다수 발생하므로 LogPane 으로 흘리면 UI thread 가 막혀
-        // 메인 INSERT 루프까지 느려짐. 첫 줄(ready 메시지) 만 보여주고 나머지는 폐기.
+        // stderr 흡수만 — 워커당 ready/repair 메시지가 다수라 LogPane 으로 흘리면 화면이
+        // 어지럽고 UI thread 도 막힌다. buffer 가 차서 deadlock 되지 않게 끝까지 읽되 출력 안 함.
         _ = Task.Run(async () =>
         {
-            try
-            {
-                var first = await p.StandardError.ReadLineAsync();
-                if (!string.IsNullOrWhiteSpace(first))
-                    onLog?.Invoke($"  [pdf-worker {workerIdx}] {first}");
-                // 나머지 stderr 는 buffer 비움 — 출력 안 함.
-                await p.StandardError.ReadToEndAsync();
-            }
+            try { await p.StandardError.ReadToEndAsync(); }
             catch { }
         });
         return p;
@@ -459,8 +467,13 @@ ON DUPLICATE KEY UPDATE
     {
         public int Cur;
         public int Ok, Err, Skip, Empty;
+        public long TotalParseMs;   // 워커 파싱 시간 합 (성능 비교)
+        public int ParsedCount;     // 파싱 시간이 집계된 건수
         private readonly int _total;
         public Stats(int total) => _total = total;
+
+        /// <summary>워커가 보고한 파싱 소요(ms) 누적 — 단일 소비자(insertTask)에서만 호출.</summary>
+        public void AddParse(long ms) { if (ms > 0) { TotalParseMs += ms; ParsedCount++; } }
 
         public void Tick(string status)
         {

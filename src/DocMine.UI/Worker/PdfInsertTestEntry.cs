@@ -21,20 +21,23 @@ internal static class PdfInsertTestEntry
 
         if (args.Length < 2)
         {
-            Console.WriteLine("usage: python.exe --pdf-insert-test <csvPath> [table]");
+            Console.WriteLine("usage: python.exe --pdf-insert-test <csvPath> [table] [engine]");
             return 2;
         }
         var csv = args[1];
         var table = args.Length > 2 ? args[2] : null;
+        var engine = args.Length > 3 ? args[3] : null;   // "iText" | "PdfPig" — A/B 비교 override
 
         using var logFile = new StreamWriter("pdf_insert_test.log", append: false, utf8) { AutoFlush = true };
         void Log(string s) { Console.WriteLine(s); logFile.WriteLine(s); }
 
         var cfg = AppConfig.Current;
         if (table is not null) cfg = cfg with { DbTable = table };
+        if (engine is not null) cfg = cfg with { PdfEngine = engine };
 
         Log($"[test] csv={csv}");
         Log($"[test] DB={cfg.DbUser}@{cfg.DbHost}:{cfg.DbPort}/{cfg.DbName} table={cfg.DbTable}");
+        Log($"[test] engine={cfg.PdfEngine}");
         Log($"[test] ProcessPath={Environment.ProcessPath}");
 
         try

@@ -25,6 +25,7 @@ public sealed class SettingsTab : TabPage
     private readonly Label _statusLabel;
     private readonly ListBox _excludeList;
     private readonly TextBox _pdfWorkersBox;
+    private readonly ComboBox _pdfEngineCombo;
 
     public SettingsTab() : base("⑤ 설정")
     {
@@ -119,8 +120,27 @@ public sealed class SettingsTab : TabPage
         tuneRow.Controls.Add(new Label { Text = "PDF 워커 수", AutoSize = true, Padding = new Padding(0, 4, 8, 0) });
         _pdfWorkersBox = new TextBox { Width = 60, Text = _data.PdfWorkers.ToString() };
         tuneRow.Controls.Add(_pdfWorkersBox);
+
+        // PDF 추출 엔진 선택 — PdfPig / iText 런타임 전환 (성능·품질 비교).
+        var engineHint = new Label
+        {
+            Text = "PDF 본문 추출 엔진. 둘 다 내장 — 같은 CSV 로 둘 다 돌려보고 적재 후 로그의\n" +
+                   "[성능] 줄(벽시계/파싱평균/처리량)을 비교해 선택. iText=AGPL, PdfPig=Apache 2.0.",
+            ForeColor = Color.Gray, AutoSize = true, Margin = new Padding(0, 8, 0, 4),
+        };
+        var engineRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
+        engineRow.Controls.Add(new Label { Text = "PDF 엔진", AutoSize = true, Padding = new Padding(0, 4, 8, 0) });
+        _pdfEngineCombo = new ComboBox { Width = 120, DropDownStyle = ComboBoxStyle.DropDownList };
+        _pdfEngineCombo.Items.AddRange(new object[] { "iText", "PdfPig" });
+        _pdfEngineCombo.SelectedItem =
+            string.Equals(_data.PdfEngine, "PdfPig", StringComparison.OrdinalIgnoreCase) ? "PdfPig" : "iText";
+        _pdfEngineCombo.SelectedIndexChanged += (_, _) => SaveNow(verbose: false);
+        engineRow.Controls.Add(_pdfEngineCombo);
+
         tuneContainer.Controls.Add(tuneHint);
         tuneContainer.Controls.Add(tuneRow);
+        tuneContainer.Controls.Add(engineHint);
+        tuneContainer.Controls.Add(engineRow);
         tuneGroup.Controls.Add(tuneContainer);
         root.Controls.Add(tuneGroup, 0, 2);
 
@@ -195,6 +215,7 @@ public sealed class SettingsTab : TabPage
         _data.DbTable = _tableBox.Text.Trim();
         _data.ScanExcludeDirs = _excludeList.Items.Cast<string>().ToList();
         _data.PdfWorkers = int.TryParse(_pdfWorkersBox.Text, out var pw) ? Math.Max(0, pw) : 0;
+        _data.PdfEngine = _pdfEngineCombo.SelectedItem as string ?? "iText";
     }
 
     private void OnAddExclude()
