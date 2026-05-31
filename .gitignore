@@ -1,29 +1,29 @@
+# 운영 데이터
 .env
 *.csv
 *.csd
-__pycache__/
-*.pyc
 *.log
-*.zip
+*.pdf
 
-# build artifacts
-build/
-dist/
-*.egg-info/
-*.egg
-
-# pyinstaller
-*.spec
+# 빌드/배포 산출물
 release/
 docmine_v*.zip
 hwpmine_v*.zip
+*.zip
 *.exe
+build/
+dist/
 
-# .NET (C# port — DocMine.{Core,Win32,HwpWorker,UI})
+# Python 시절 잔존 로컬 캐시 (워킹트리에만 있음, 추적 안 함)
+__pycache__/
+*.pyc
+*.spec
+*.egg-info/
+*.egg
+
+# .NET
 bin/
 obj/
 publish/
 *.user
 .vs/
-
-*.pdf
