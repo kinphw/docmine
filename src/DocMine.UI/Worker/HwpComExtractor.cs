@@ -18,6 +18,9 @@ internal sealed class HwpComExtractor : IDisposable
     private readonly int _restartEvery;
     private readonly bool _killOnRestart;
 
+    /// <param name="killOnRestart">COM 재활용·Dispose 시 PC 의 Hwp.exe 를 모두 정리할지.
+    /// 배치 적재(HwpInsertRunner) 는 시작 시 이미 좀비 정리를 하므로 true.
+    /// 인터랙티브 추출기(ExtractorTab) 는 사용자가 띄워둔 한/글 보호 위해 false.</param>
     public HwpComExtractor(int restartEvery = 500, bool killOnRestart = true)
     {
         _restartEvery = restartEvery;

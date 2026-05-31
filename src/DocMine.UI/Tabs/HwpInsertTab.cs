@@ -4,7 +4,10 @@
 //   - HwpInsertRunner 호출 (HwpWorker.exe spawn)
 //   - 기본 CSV = AppConfig.DefaultHwpCsv (.csd)
 //   - 라벨/메시지 "HWP" 로 변경
-//   - "공유 한/글 보호" 옵션 (한/글 외부에 띄워둔 상태에서 워커가 같이 죽이지 않도록)
+//
+// 운영 가정: 배치 도중 사용자가 한/글로 작업하지 않음. 시작 직후 PC 의 모든
+// 좀비 Hwp.exe 를 정리하므로(이전 실행 잔재 회수 + COM 재활용 안정성),
+// 본인이 작업 중이던 한/글 세션도 같이 종료됩니다.
 
 using DocMine.Core.Config;
 using DocMine.Core.Pipeline;
@@ -16,7 +19,6 @@ public sealed class HwpInsertTab : TabPage, IBusyTab
     private readonly TextBox _csvBox;
     private readonly TextBox _startBox;
     private readonly TextBox _endBox;
-    private readonly CheckBox _keepHwpBox;
     private readonly Button _startBtn;
     private readonly Button _stopBtn;
     private readonly LogPane _log;
@@ -63,15 +65,6 @@ public sealed class HwpInsertTab : TabPage, IBusyTab
         rngRow.Controls.Add(_endBox);
         rngGroup.Controls.Add(rngRow);
 
-        // 옵션 — 외부 한/글 보호.
-        var optGroup = new GroupBox { Text = "옵션", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
-        _keepHwpBox = new CheckBox
-        {
-            Text = "외부에 떠 있는 한/글(Hwp.exe) 죽이지 않기 (작업 중인 한/글 보호)",
-            AutoSize = true, Checked = false,
-        };
-        optGroup.Controls.Add(_keepHwpBox);
-
         // 버튼
         var btnRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(0, 6, 0, 6) };
         _startBtn = new Button { Text = "HWP 적재 시작", AutoSize = true };
@@ -87,9 +80,8 @@ public sealed class HwpInsertTab : TabPage, IBusyTab
 
         var root = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Padding = new Padding(8),
+            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(8),
         };
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -98,9 +90,8 @@ public sealed class HwpInsertTab : TabPage, IBusyTab
         root.Controls.Add(info, 0, 0);
         root.Controls.Add(csvGroup, 0, 1);
         root.Controls.Add(rngGroup, 0, 2);
-        root.Controls.Add(optGroup, 0, 3);
-        root.Controls.Add(btnRow, 0, 4);
-        root.Controls.Add(logFrame, 0, 5);
+        root.Controls.Add(btnRow, 0, 3);
+        root.Controls.Add(logFrame, 0, 4);
 
         Controls.Add(root);
     }
@@ -157,11 +148,10 @@ public sealed class HwpInsertTab : TabPage, IBusyTab
         var cfg = AppConfig.Current;
         _log.AppendLine($"  settings: {cfg.SettingsPath}");
         _log.AppendLine($"  DB:       {cfg.DbUser}@{cfg.DbHost}:{cfg.DbPort}/{cfg.DbName} (table={cfg.DbTable})");
-        _log.AppendLine($"  외부 한/글 보호: {(_keepHwpBox.Checked ? "ON" : "OFF")}");
 
         try
         {
-            var runner = new HwpInsertRunner(cfg, keepHwp: _keepHwpBox.Checked);
+            var runner = new HwpInsertRunner(cfg);
             // background thread — UI thread 독점 + onProgress BeginInvoke 폭주 회피.
             var token = _cts.Token;
             await Task.Run(() => runner.RunAsync(

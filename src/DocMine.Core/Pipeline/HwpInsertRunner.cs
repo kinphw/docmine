@@ -45,14 +45,11 @@ ON DUPLICATE KEY UPDATE
     private readonly AppConfig _cfg;
     private readonly DocumentRepository _repo;
     private readonly string _workerExePath;
-    private readonly bool _keepHwp;
 
-    /// <param name="keepHwp">true 면 워커가 외부 한/글 프로세스 죽이지 않음 (추출기용).</param>
-    public HwpInsertRunner(AppConfig cfg, bool keepHwp = false)
+    public HwpInsertRunner(AppConfig cfg)
     {
         _cfg = cfg;
         _repo = new DocumentRepository(cfg);
-        _keepHwp = keepHwp;
 
         // 워커는 자기 자신(python.exe) 을 --hwp-worker 모드로 재실행.
         // Python mp.Process 가 같은 인터프리터 바이너리를 spawn 하는 패턴 1:1.
@@ -263,7 +260,6 @@ ON DUPLICATE KEY UPDATE
         };
         // 같은 binary 재실행 → --hwp-worker 모드 진입.
         psi.ArgumentList.Add("--hwp-worker");
-        if (_keepHwp) psi.ArgumentList.Add("--keep-hwp");
 
         var p = Process.Start(psi)
             ?? throw new InvalidOperationException("HwpWorker spawn 실패");

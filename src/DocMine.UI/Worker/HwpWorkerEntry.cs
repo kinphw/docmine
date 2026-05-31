@@ -21,8 +21,9 @@
 //
 // CLI 옵션:
 //   --hwp-worker             (필수) 워커 모드 진입
-//   --keep-hwp               COM 재활용 시 외부 Hwp.exe 죽이지 않음
-//                            (추출기에서 사용자가 띄운 한/글 보호)
+//   --keep-hwp               COM 재활용·종료 시 외부 Hwp.exe 죽이지 않음.
+//                            인터랙티브 추출기(ExtractorTab) 에서만 사용 —
+//                            사용자가 띄워둔 한/글 보호용.
 
 using System.Text;
 using System.Text.Json;
