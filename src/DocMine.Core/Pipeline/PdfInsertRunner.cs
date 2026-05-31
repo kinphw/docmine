@@ -150,7 +150,7 @@ ON DUPLICATE KEY UPDATE
 
         var workers = Math.Max(1, Math.Min(AppConfig.PdfWorkers, tasks.Count));
         var cpu = Environment.ProcessorCount;
-        onLog?.Invoke($"  PDF 엔진: {_cfg.PdfEngine}  |  파서 워커 {workers}개 병렬 (논리 CPU {cpu}개)…");
+        onLog?.Invoke($"  파서 워커 {workers}개 병렬 (논리 CPU {cpu}개)…");
 
         // 작업을 워커 수로 라운드로빈 분배 — 각 워커 = 자기 큐를 직렬 처리.
         var queues = new List<List<(int Idx, string Path, CsvRow Row)>>();
@@ -303,7 +303,7 @@ ON DUPLICATE KEY UPDATE
         var avgMs = stats.ParsedCount > 0 ? stats.TotalParseMs / (double)stats.ParsedCount : 0;
         var thru = secs > 0 ? stats.ParsedCount / secs : 0;
         onLog?.Invoke(
-            $"  [성능] 엔진={_cfg.PdfEngine}  벽시계={secs:F1}s  " +
+            $"  [성능] 벽시계={secs:F1}s  " +
             $"파싱평균={avgMs:F0}ms/건  처리량={thru:F1}건/s  " +
             $"(파싱 {stats.ParsedCount:N0}건, 파싱시간합 {stats.TotalParseMs:N0}ms)");
 
@@ -332,7 +332,6 @@ ON DUPLICATE KEY UPDATE
             WorkingDirectory = Path.GetDirectoryName(_workerExePath),
         };
         psi.ArgumentList.Add("--pdf-worker");
-        psi.ArgumentList.Add(_cfg.PdfEngine);   // 워커가 쓸 엔진 — run 중 일관성 보장
 
         var p = Process.Start(psi) ?? throw new InvalidOperationException("PdfWorker spawn 실패");
 
@@ -453,7 +452,7 @@ ON DUPLICATE KEY UPDATE
     // 정상인 패턴 = 파일 *내용*이 아니라 raw read *횟수*가 변수라는 뜻.)
     // Python 코디네이터엔 이런 raw read 가 없었고 crash 도 없었다.
     //   → 메인은 파일을 일절 열지 않는다. 크기는 스캔 CSV 가 이미 수집한 값을 사용.
-    //     (실제 본문 read 는 격리된 워커 프로세스의 iText 에서만 발생.)
+    //     (실제 본문 read 는 격리된 워커 프로세스의 PdfPig 에서만 발생.)
     private static string SniffSize(long sizeBytes)
         => sizeBytes >= 1024 * 1024
             ? $"size={sizeBytes / 1024.0 / 1024.0:F1}MB"

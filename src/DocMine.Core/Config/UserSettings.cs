@@ -33,10 +33,6 @@ public sealed class UserSettingsData
 
     // PDF 워커 프로세스 수. 0 = 자동 (논리 CPU 수).
     public int PdfWorkers { get; set; } = 0;
-
-    // PDF 본문 추출 엔진 — "iText" | "PdfPig". 둘 다 바이너리에 포함되며 ⑤ 설정 탭에서 전환.
-    // 성능/품질 비교용. 기본은 운영 검증된 iText.
-    public string PdfEngine { get; set; } = "iText";
 }
 
 public static class UserSettings

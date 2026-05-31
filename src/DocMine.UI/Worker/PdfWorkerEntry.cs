@@ -43,11 +43,7 @@ internal static class PdfWorkerEntry
         Console.SetError(new StreamWriter(Console.OpenStandardError(), utf8) { AutoFlush = true });
         Console.SetIn(new StreamReader(Console.OpenStandardInput(), utf8));
 
-        // args[1] = 엔진명 ("iText"|"PdfPig"). 부모가 설정값을 전달 — run 중 일관성 보장.
-        var engineName = args.Length > 1 ? args[1] : PdfTextExtractor.DefaultEngine;
-        var engine = PdfTextExtractor.Create(engineName);
-
-        Console.Error.WriteLine($"[PdfWorker] ready (PID={Environment.ProcessId}, engine={engine.Name})");
+        Console.Error.WriteLine($"[PdfWorker] ready (PID={Environment.ProcessId})");
 
         string? line;
         while ((line = Console.In.ReadLine()) is not null)
@@ -81,7 +77,7 @@ internal static class PdfWorkerEntry
             var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
-                var text = engine.Extract(req.Path);
+                var text = PdfTextExtractor.Extract(req.Path);
                 sw.Stop();
                 if (string.IsNullOrEmpty(text))
                 {

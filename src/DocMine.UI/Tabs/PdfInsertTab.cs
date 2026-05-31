@@ -28,7 +28,7 @@ public sealed class PdfInsertTab : TabPage, IBusyTab
             Dock = DockStyle.Top,
             AutoSize = true,
             ForeColor = Color.Gray,
-            Text = "설정한 엔진(⑤ 설정: PdfPig/iText)으로 PDF 본문을 뽑아 documents 테이블에 적재합니다.\n" +
+            Text = "PdfPig 로 PDF 본문을 뽑아 documents 테이블에 적재합니다.\n" +
                    "스캔본/이미지 PDF 는 빈 본문이 나올 수 있습니다 (OCR 미적용 → 'empty' 분류).",
         };
 

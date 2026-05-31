@@ -14,17 +14,14 @@
 
     의존:
       MySqlConnector — pymysql 대체 (async, MariaDB 호환, MIT)
-      PdfPig + iText — PDF 텍스트 추출 *두 엔진 동시 포함*. ⑤ 설정 탭에서 런타임 전환.
-                       성능/품질 비교 후 하나로 확정 예정.
+      PdfPig         — PDF 텍스트 추출. Apache 2.0, 순수 매니지드.
+                       iText(AGPL)와 A/B 비교(31,853건) 결과 PdfPig 채택:
+                       2.5배 빠르고 에러 4배 적으며 라이선스 의무 없음.
   -->
 
   <ItemGroup>
     <PackageReference Include="MySqlConnector" Version="2.3.7" />
-    <!-- PDF 엔진 2종 동시 포함 — 설정에서 전환해 A/B 비교.
-         PdfPig : 순수 매니지드, Apache 2.0 (라이선스 부담 없음, 용량 작음)
-         iText 9: Java 본진 이식, 손상 PDF 강건. AGPL (배포 시 의무 발생) -->
     <PackageReference Include="PdfPig" Version="0.1.14" />
-    <PackageReference Include="itext" Version="9.6.0" />
   </ItemGroup>
 
 </Project>
