@@ -33,7 +33,7 @@
     <!-- ─ 버전 SSOT ─────────────────────────────────────────────────────
          새 버전 릴리스 시 <Version> 한 줄만 bump. Python 판 0.4.3 다음
          이지만 C# 포트는 별도 트랙으로 0.5.0 부터 시작. -->
-    <Version>0.5.0</Version>
+    <Version>0.5.1-dev</Version>
     <FileVersion>$(Version).0</FileVersion>
     <AssemblyVersion>$(Version).0</AssemblyVersion>
     <InformationalVersion>$(Version)</InformationalVersion>
