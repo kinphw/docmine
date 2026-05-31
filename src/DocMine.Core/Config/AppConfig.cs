@@ -16,7 +16,6 @@ public sealed record AppConfig(
     string DbName,
     string DbTable,
     IReadOnlyList<string> ScanExcludeDirs,
-    int    PdfWorkersResolved,
     string SettingsPath)
 {
     // ─ 하드코딩 상수 ─ 사용자가 바꿀 필요 없는 값들.
@@ -31,10 +30,6 @@ public sealed record AppConfig(
     public const int ComRestart          = 500;   // HWP COM 워커 재시작 주기 (건)
     public const int ParseTimeoutSeconds = 60;    // HWP 파싱 1건 타임아웃
 
-    // PDF 워커 수 — settings.json 의 PdfWorkers 가 0(자동) 이면 논리 CPU 수.
-    // 사용자가 ⑤ 설정 탭에서 1~32 사이로 명시 가능.
-    public static int PdfWorkers => Current.PdfWorkersResolved;
-
     // ─ 전역 캐시 ─────────────────────────────────────────────────────
     private static AppConfig _current = BuildFromSettings();
     public static AppConfig Current => _current;
@@ -48,10 +43,6 @@ public sealed record AppConfig(
         LegacyEnvImporter.ImportIfNeeded();
 
         var data = UserSettings.Load();
-        // PdfWorkers: 사용자 명시값(1~32) 우선, 0/미지정 시 논리 CPU 수.
-        var resolvedWorkers = data.PdfWorkers > 0
-            ? Math.Clamp(data.PdfWorkers, 1, 32)
-            : Math.Max(1, Environment.ProcessorCount);
 
         return new AppConfig(
             DbHost:   data.DbHost,
@@ -61,7 +52,6 @@ public sealed record AppConfig(
             DbName:   data.DbName,
             DbTable:  data.DbTable,
             ScanExcludeDirs: data.ScanExcludeDirs.ToList(),
-            PdfWorkersResolved: resolvedWorkers,
             SettingsPath: UserSettings.SettingsPath());
     }
 

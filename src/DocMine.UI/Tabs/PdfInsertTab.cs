@@ -150,8 +150,6 @@ public sealed class PdfInsertTab : TabPage, IBusyTab
         _stopBtn.Text = "중지";
         _log.Clear();
         _eta.Reset();
-        // 메인 GUI silent crash 대비 — LogPane 메시지를 작업 폴더 디스크 파일에도 동시 기록.
-        _log.EnableMirror("pdf_insert.log");
 
         // 적용된 설정 경로 + DB 정보 명시.
         var cfg = AppConfig.Current;

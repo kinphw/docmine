@@ -24,7 +24,6 @@ public sealed class SettingsTab : TabPage
     private readonly Label _testResult;
     private readonly Label _statusLabel;
     private readonly ListBox _excludeList;
-    private readonly TextBox _pdfWorkersBox;
 
     public SettingsTab() : base("⑤ 설정")
     {
@@ -34,11 +33,10 @@ public sealed class SettingsTab : TabPage
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 6,
+            RowCount = 5,
             Padding = new Padding(12),
             AutoScroll = true,
         };
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -106,25 +104,6 @@ public sealed class SettingsTab : TabPage
         excludeGroup.Controls.Add(excludeContainer);
         root.Controls.Add(excludeGroup, 0, 1);
 
-        // ── PDF 적재 튜닝 ─────────────────────────────────────────────
-        var tuneGroup = MakeGroup("PDF 적재 튜닝");
-        var tuneContainer = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1 };
-        var tuneHint = new Label
-        {
-            Text = "PDF 워커 프로세스 수 (0 = 자동: 논리 CPU 수).\n" +
-                   "메모리 압박/silent crash 시 보수적으로 줄임 (예: 2~4).",
-            ForeColor = Color.Gray, AutoSize = true, Margin = new Padding(0, 0, 0, 4),
-        };
-        var tuneRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
-        tuneRow.Controls.Add(new Label { Text = "PDF 워커 수", AutoSize = true, Padding = new Padding(0, 4, 8, 0) });
-        _pdfWorkersBox = new TextBox { Width = 60, Text = _data.PdfWorkers.ToString() };
-        tuneRow.Controls.Add(_pdfWorkersBox);
-
-        tuneContainer.Controls.Add(tuneHint);
-        tuneContainer.Controls.Add(tuneRow);
-        tuneGroup.Controls.Add(tuneContainer);
-        root.Controls.Add(tuneGroup, 0, 2);
-
         // ── 하단 액션 + 상태 ────────────────────────────────────────────
         var bot = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(0, 8, 0, 0) };
         var saveBtn = new Button { Text = "지금 저장", AutoSize = true };
@@ -139,29 +118,29 @@ public sealed class SettingsTab : TabPage
         bot.Controls.Add(saveBtn);
         bot.Controls.Add(openFolderBtn);
         bot.Controls.Add(pathLbl);
-        root.Controls.Add(bot, 0, 3);
+        root.Controls.Add(bot, 0, 2);
 
         _statusLabel = new Label
         {
             Dock = DockStyle.Top, AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(0, 4, 0, 0),
         };
-        root.Controls.Add(_statusLabel, 0, 4);
+        root.Controls.Add(_statusLabel, 0, 3);
 
         // 안내 텍스트.
         var note = new Label
         {
             Dock = DockStyle.Top, AutoSize = true, ForeColor = Color.Gray,
             Padding = new Padding(0, 12, 0, 0),
-            Text = "• CSV 경로 · 스캔 드라이브 · 적재 튜닝은 코드 기본값을 사용하며 별도 저장하지 않습니다.\n" +
+            Text = "• CSV 경로 · 스캔 드라이브는 코드 기본값을 사용하며 별도 저장하지 않습니다.\n" +
                    "• CSV 출력 파일명은 '스캔' 탭에서 매 실행마다 직접 바꿀 수 있습니다.\n" +
                    "• 스캔 드라이브는 '스캔' 탭에서 마운트된 드라이브 목록을 보고 직접 선택합니다.",
         };
-        root.Controls.Add(note, 0, 5);
+        root.Controls.Add(note, 0, 4);
 
         Controls.Add(root);
 
         // ─ Leave 이벤트로 자동 저장 ─ Forge UserSettings 패턴.
-        foreach (var tb in new[] { _hostBox, _portBox, _userBox, _pwBox, _dbBox, _tableBox, _pdfWorkersBox })
+        foreach (var tb in new[] { _hostBox, _portBox, _userBox, _pwBox, _dbBox, _tableBox })
             tb.Leave += (_, _) => SaveNow(verbose: false);
     }
 
@@ -195,7 +174,6 @@ public sealed class SettingsTab : TabPage
         _data.DbName = _dbBox.Text.Trim();
         _data.DbTable = _tableBox.Text.Trim();
         _data.ScanExcludeDirs = _excludeList.Items.Cast<string>().ToList();
-        _data.PdfWorkers = int.TryParse(_pdfWorkersBox.Text, out var pw) ? Math.Max(0, pw) : 0;
     }
 
     private void OnAddExclude()

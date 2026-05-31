@@ -25,9 +25,6 @@ internal static class Program
             return HwpWorkerEntry.Run(args);
         if (args.Length > 0 && args[0] == "--pdf-worker")
             return PdfWorkerEntry.Run(args);
-        // 진단용 헤드리스 적재 — GUI 없이 PdfInsertRunner 전체 경로 재현.
-        if (args.Length > 0 && args[0] == "--pdf-insert-test")
-            return PdfInsertTestEntry.Run(args);
 
         // ── GUI 모드 ──────────────────────────────────────────────────
         // 부모가 어떻게 죽든 자식 워커 인스턴스도 함께 종료되도록 Job Object 자가 할당.

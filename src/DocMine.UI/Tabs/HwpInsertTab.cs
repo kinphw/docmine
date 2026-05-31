@@ -153,7 +153,6 @@ public sealed class HwpInsertTab : TabPage, IBusyTab
         _stopBtn.Text = "중지";
         _log.Clear();
         _eta.Reset();
-        _log.EnableMirror("hwp_insert.log");
 
         var cfg = AppConfig.Current;
         _log.AppendLine($"  settings: {cfg.SettingsPath}");
