@@ -125,35 +125,24 @@ ON DUPLICATE KEY UPDATE
         }
         onLog?.Invoke($"  처리 대상: {toProcess.Count:N0}건 (skip {skipCount:N0}건 제외)");
 
-        // ── 2) 처리 대상만 파일 존재 점검 ──
-        var tasks = new List<(int Idx, string Path, CsvRow Row)>();
+        // ── 처리 대상 → 작업 리스트 ──
+        // 파일 존재 점검은 워커 단계로 미룬다(병렬 + 건별 진행). 예전엔 여기서 전 파일을
+        // 직렬 File.Exists 점검했는데, skip 이 적을 때(예: 빈 테이블) 수만 건을 로그·진행
+        // 없이 훑어 '멈춘 것처럼' 보였다. 점검 자체는 메타데이터라 DRM 에도 안전.
+        var tasks = new List<(int Idx, string Path, CsvRow Row)>(toProcess.Count);
+        foreach (var (idx, row) in toProcess)
+            tasks.Add((idx, Path.Combine(row.Directory, row.Filename), row));
+
         var pendingCommit = 0;
 
         await using var conn = _repo.OpenConnection();
-        _bodyByteBudget = QueryPacketBudget(conn, onLog);
+        _bodyByteBudget = QueryPacketBudget(conn);
         await using var errLogStream = new StreamWriter(
             "pdf_parse_errors.csv", append: true,
             new System.Text.UTF8Encoding(true));
 
-        // 성능 비교용 벽시계 — 파일 점검 + 파싱 + INSERT 전체 구간.
+        // 성능 비교용 벽시계 — 파싱 + INSERT 전체 구간.
         var wall = System.Diagnostics.Stopwatch.StartNew();
-
-        foreach (var (idx, row) in toProcess)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var fp = Path.Combine(row.Directory, row.Filename);
-            if (!File.Exists(PdfTextExtractor.WinLongPath(fp)))
-            {
-                await InsertAsync(conn, row, null, "error", "파일 없음");
-                await WriteErrAsync(errLogStream, row, "파일 없음");
-                pendingCommit++;
-                stats.Tick("error");
-                onProgress?.Invoke(stats.Snapshot());
-                if (pendingCommit >= AppConfig.CommitEvery) { conn.Close(); conn.Open(); pendingCommit = 0; }
-                continue;
-            }
-            tasks.Add((idx, fp, row));
-        }
 
         // ── 2) 병렬 파싱 + 결과 채널 → 메인에서 INSERT ──
         if (tasks.Count == 0 || cancellationToken.IsCancellationRequested)
@@ -209,6 +198,17 @@ ON DUPLICATE KEY UPDATE
                 foreach (var t in queue)
                 {
                     if (cancellationToken.IsCancellationRequested) break;
+
+                    // 파일 존재 점검 (메타데이터 — 내용 read 아님, DRM 안전). 없으면 워커
+                    // 호출 없이 error 결과만 채널로 — 진행바가 즉시 갱신됨.
+                    if (!File.Exists(PdfTextExtractor.WinLongPath(t.Path)))
+                    {
+                        CrashTrace($"[{t.Idx}] >>> {t.Path}  (파일 없음)");
+                        var miss = new WorkerResult(t.Row, "error", null, "파일 없음", 0);
+                        CrashTrace($"[{t.Idx}] <<< error(missing)");
+                        await channel.Writer.WriteAsync(miss, cancellationToken);
+                        continue;
+                    }
 
                     // 워커 죽었으면 새로 spawn.
                     if (worker is null || worker.HasExited)
@@ -372,8 +372,9 @@ ON DUPLICATE KEY UPDATE
         }
     }
 
-    /// <summary>서버 max_allowed_packet 조회 → 본문 byte 예산 산출 (다른 컬럼+프로토콜 여유 차감).</summary>
-    private static long QueryPacketBudget(MySqlConnection conn, Action<string>? onLog)
+    /// <summary>서버 max_allowed_packet 조회 → 본문 byte 예산 산출 (다른 컬럼+프로토콜 여유 차감).
+    /// 결과는 FitBody 의 안전망(거대 본문만 절단)에 쓰이며, 실제 절단 시에만 로그를 남긴다.</summary>
+    private static long QueryPacketBudget(MySqlConnection conn)
     {
         long maxPacket = 16L * 1024 * 1024;
         try
@@ -384,11 +385,7 @@ ON DUPLICATE KEY UPDATE
         }
         catch { /* 조회 실패 시 보수적 16MB 가정 */ }
 
-        var budget = Math.Max(256 * 1024, maxPacket - 512 * 1024);  // 512KB 여유
-        onLog?.Invoke($"  서버 max_allowed_packet ≈ {maxPacket / 1024.0 / 1024.0:F0}MB → 본문 상한 {budget / 1024.0 / 1024.0:F0}MB");
-        if (maxPacket <= 16L * 1024 * 1024)
-            onLog?.Invoke("  (큰 문서 전체를 색인하려면 서버 max_allowed_packet 상향 권장: 예 256M)");
-        return budget;
+        return Math.Max(256 * 1024, maxPacket - 512 * 1024);  // 512KB 여유
     }
 
     /// <summary>

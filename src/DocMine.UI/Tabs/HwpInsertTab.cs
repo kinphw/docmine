@@ -20,6 +20,7 @@ public sealed class HwpInsertTab : TabPage, IBusyTab
     private readonly Button _startBtn;
     private readonly Button _stopBtn;
     private readonly LogPane _log;
+    private readonly ProgressEta _eta = new();
     private CancellationTokenSource? _cts;
     private bool _busy;
 
@@ -151,6 +152,7 @@ public sealed class HwpInsertTab : TabPage, IBusyTab
         _stopBtn.Enabled = true;
         _stopBtn.Text = "중지";
         _log.Clear();
+        _eta.Reset();
         _log.EnableMirror("hwp_insert.log");
 
         var cfg = AppConfig.Current;
@@ -172,7 +174,8 @@ public sealed class HwpInsertTab : TabPage, IBusyTab
                     var bar = ProgressBar(pct, 30);
                     var crash = p.Crash > 0 ? $" crash:{p.Crash}" : "";
                     var skip  = p.Skip  > 0 ? $" skip:{p.Skip}"   : "";
-                    _log.UpdateLive($"  [{bar}] {p.Index}/{p.Total}  ok:{p.Ok} err:{p.Err}{crash}{skip}");
+                    var eta   = _eta.Format(p.Index, p.Total);
+                    _log.UpdateLive($"  [{bar}] {p.Index}/{p.Total}  ok:{p.Ok} err:{p.Err}{crash}{skip}{eta}");
                 },
                 cancellationToken: token), token);
         }

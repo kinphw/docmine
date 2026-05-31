@@ -17,6 +17,7 @@ public sealed class PdfInsertTab : TabPage, IBusyTab
     private readonly Button _startBtn;
     private readonly Button _stopBtn;
     private readonly LogPane _log;
+    private readonly ProgressEta _eta = new();
     private CancellationTokenSource? _cts;
     private bool _busy;
 
@@ -148,6 +149,7 @@ public sealed class PdfInsertTab : TabPage, IBusyTab
         _stopBtn.Enabled = true;
         _stopBtn.Text = "중지";
         _log.Clear();
+        _eta.Reset();
         // 메인 GUI silent crash 대비 — LogPane 메시지를 작업 폴더 디스크 파일에도 동시 기록.
         _log.EnableMirror("pdf_insert.log");
 
@@ -172,7 +174,8 @@ public sealed class PdfInsertTab : TabPage, IBusyTab
                     var bar = ProgressBar(pct, 30);
                     var empty = p.Empty > 0 ? $" empty:{p.Empty}" : "";
                     var skip  = p.Skip  > 0 ? $" skip:{p.Skip}"   : "";
-                    _log.UpdateLive($"  [{bar}] {p.Index}/{p.Total}  ok:{p.Ok} err:{p.Err}{empty}{skip}");
+                    var eta   = _eta.Format(p.Index, p.Total);
+                    _log.UpdateLive($"  [{bar}] {p.Index}/{p.Total}  ok:{p.Ok} err:{p.Err}{empty}{skip}{eta}");
                 },
                 cancellationToken: token), token);
         }
