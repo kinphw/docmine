@@ -82,13 +82,10 @@ $readme = @"
 ## 설정 위치
 - ``%APPDATA%\DocMine\settings.json`` — DB 접속 + 스캔 예외 폴더
 
-## 진단 (PDF 적재 silent crash 발생 시)
-1. 작업 폴더의 ``pdf_crash_trace.log`` 마지막 ``>>>`` 줄 확인 → 죽인 파일의
-   path / size / feat (JBIG2/JPX/ENC/XFA/FORM) / producer 메타 확인.
-
-2. (선택) Windows Error Reporting 자동 덤프 ON — 운영 PC 1회 설정.
-   한 번 설정하면 그 후 ``python.exe`` 비정상 종료마다 자동 dump 생성됨.
-   진단 후엔 OFF 권장 (계속 dump 쌓이는 것 방지).
+## 진단 (비정상 종료 발생 시)
+Windows Error Reporting 자동 덤프 ON — 운영 PC 1회 설정.
+한 번 설정하면 그 후 ``python.exe`` 비정상 종료마다 자동 dump 생성됨.
+진단 후엔 OFF 권장 (계속 dump 쌓이는 것 방지).
 
    **ON** — 관리자 cmd:
 ``````
