@@ -31,6 +31,10 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+
+    <!-- Explorer/바로가기에 표시되는 exe 리소스 아이콘. 폼 윈도우 아이콘은 AppIcon.Build()
+         가 코드로 별도 생성. 디자인이 일치하도록 두 곳을 같이 업데이트할 것. -->
+    <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>

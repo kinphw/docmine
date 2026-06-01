@@ -31,11 +31,15 @@
     <DebugSymbols>true</DebugSymbols>
 
     <!-- ─ 버전 SSOT ─────────────────────────────────────────────────────
-         새 버전 릴리스 시 <Version> 한 줄만 bump. Python 판 0.4.3 다음
-         이지만 C# 포트는 별도 트랙으로 0.5.0 부터 시작. -->
+         새 버전 릴리스 시 Version + FileVersion/AssemblyVersion 같이 bump.
+         Version 은 SemVer 풀버전(pre-release suffix '-dev' 등 허용 — About
+         다이얼로그·NuGet·zip 파일명에 사용). FileVersion/AssemblyVersion 은
+         Windows 의 4-tuple 만 허용하므로 numeric base 만. pre-release 사이클
+         에도 같은 base 숫자 유지.
+         Python 판 0.4.3 다음이지만 C# 포트는 별도 트랙으로 0.5.0 부터 시작. -->
     <Version>0.5.1-dev</Version>
-    <FileVersion>$(Version).0</FileVersion>
-    <AssemblyVersion>$(Version).0</AssemblyVersion>
+    <FileVersion>0.5.1.0</FileVersion>
+    <AssemblyVersion>0.5.1.0</AssemblyVersion>
     <InformationalVersion>$(Version)</InformationalVersion>
     <!-- .NET SDK 가 build 시 git commit hash 를 InformationalVersion 에
          자동 append (예: "0.5.0+ccc7930...") 하는 동작 끄기. About 다이얼로그에
