@@ -83,13 +83,15 @@ public sealed class SearchTab : TabPage
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 4,
+            RowCount = 3,
             Padding = new Padding(8),
         };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 검색 컨트롤
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // 결과
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 로그
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 하단 버튼
+        // 하단 버튼은 root 밖에서 Dock = Bottom 으로 — TableLayoutPanel 의 AutoSize row
+        // 안에 또 AutoSize TableLayoutPanel 을 박으면 desired-height 체인이 0 으로
+        // collapse 되는 케이스가 있어, 절대 잘리지 않는 Dock=Bottom 패턴을 쓴다.
 
         // ─ 상단 검색 컨트롤 ────────────────────────────────────────────
         var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 2 };
@@ -184,10 +186,17 @@ public sealed class SearchTab : TabPage
         root.Controls.Add(logFrame, 0, 2);
 
         // ─ 하단: info label (좌) + 버튼 (우) ─────────────────────────
+        //   root 의 마지막 row 가 아니라 폼 직속 Dock=Bottom 으로 박는다.
+        //   TableLayoutPanel AutoSize row 안에 또 AutoSize 컨테이너를 박으면
+        //   desired-height 가 0 으로 잡히는 윈도우 폼 회귀가 있어, 버튼이
+        //   기본 창 크기에선 안 보이고 최대화 시에만 일부 보이는 증상 발생.
         var bot = new TableLayoutPanel
         {
-            Dock = DockStyle.Top, AutoSize = true,
-            ColumnCount = 2, RowCount = 1, Padding = new Padding(0, 4, 0, 0),
+            Dock = DockStyle.Bottom,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2, RowCount = 1,
+            Padding = new Padding(8, 4, 8, 4),
         };
         bot.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         bot.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -202,7 +211,12 @@ public sealed class SearchTab : TabPage
         };
         bot.Controls.Add(_infoLabel, 0, 0);
 
-        var btnFlow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft };
+        var btnFlow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            FlowDirection = FlowDirection.RightToLeft,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+        };
         _openBtn      = new Button { Text = "파일 열기",  AutoSize = true, Enabled = false };
         _openPathBtn  = new Button { Text = "경로 열기",  AutoSize = true, Enabled = false };
         _delBtn       = new Button { Text = "제외 (Del)", AutoSize = true, Enabled = false };
@@ -220,9 +234,10 @@ public sealed class SearchTab : TabPage
         btnFlow.Controls.Add(_moreBtn);
         bot.Controls.Add(btnFlow, 1, 0);
 
-        root.Controls.Add(bot, 0, 3);
-
+        // Dock 처리는 Controls 콜렉션 *역순* — root(Fill) 먼저 add, bot(Bottom) 나중.
+        // 역순 처리로 bot 이 먼저 하단을 차지하고 root 가 잔여 영역을 채운다.
         Controls.Add(root);
+        Controls.Add(bot);
 
         _log.AppendLine($"  settings: {cfg.SettingsPath}");
         _log.AppendLine($"  DB:       {cfg.DbUser}@{cfg.DbHost}:{cfg.DbPort}/{cfg.DbName} (table={cfg.DbTable})");
