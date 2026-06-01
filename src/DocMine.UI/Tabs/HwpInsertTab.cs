@@ -17,6 +17,7 @@ namespace DocMine.UI.Tabs;
 public sealed class HwpInsertTab : TabPage, IBusyTab
 {
     private readonly TextBox _csvBox;
+    private readonly LinkLabel _useLastScanLink;
     private readonly TextBox _startBox;
     private readonly TextBox _endBox;
     private readonly Button _startBtn;
@@ -53,6 +54,19 @@ public sealed class HwpInsertTab : TabPage, IBusyTab
         csvRow.Controls.Add(_csvBox, 0, 0);
         csvRow.Controls.Add(browseBtn, 1, 0);
         csvGroup.Controls.Add(csvRow);
+
+        // 최근 스캔 결과 자동 채움 링크 — 탭 전환 시 갱신, 등록된 최근 경로가
+        // 현재 입력란 값과 다를 때만 표시.
+        _useLastScanLink = new LinkLabel
+        {
+            AutoSize = true,
+            Visible = false,
+            Padding = new Padding(2, 4, 0, 0),
+            LinkColor = Color.SteelBlue,
+        };
+        _useLastScanLink.LinkClicked += (_, _) => UseLastScan();
+        csvGroup.Controls.Add(_useLastScanLink);
+        VisibleChanged += (_, _) => RefreshUseLastScanLink();
 
         // 범위
         var rngGroup = new GroupBox { Text = "처리 범위 (비우면 전체)", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
@@ -201,6 +215,33 @@ public sealed class HwpInsertTab : TabPage, IBusyTab
         var n = (int)Math.Round(pct / 100.0 * width);
         n = Math.Clamp(n, 0, width);
         return new string('#', n) + new string('.', width - n);
+    }
+
+    // ─ 최근 스캔 결과 핸드오프 ─────────────────────────────────────
+    private void RefreshUseLastScanLink()
+    {
+        if (!Visible) return;
+        var last = ScanResultRegistry.HwpLast;
+        if (string.IsNullOrEmpty(last)) { _useLastScanLink.Visible = false; return; }
+
+        string current;
+        try { current = Path.GetFullPath(_csvBox.Text.Trim()); }
+        catch { current = ""; }
+        if (string.Equals(last, current, StringComparison.OrdinalIgnoreCase))
+        {
+            _useLastScanLink.Visible = false;
+            return;
+        }
+        _useLastScanLink.Text = $"↻ 최근 스캔 결과 사용: {Path.GetFileName(last)}";
+        _useLastScanLink.Visible = true;
+    }
+
+    private void UseLastScan()
+    {
+        var last = ScanResultRegistry.HwpLast;
+        if (string.IsNullOrEmpty(last)) return;
+        _csvBox.Text = last;
+        _useLastScanLink.Visible = false;
     }
 
     // ─ IBusyTab ─────────────────────────────────────────────────────

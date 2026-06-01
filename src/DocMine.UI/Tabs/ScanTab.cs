@@ -326,6 +326,11 @@ public sealed class ScanTab : TabPage, IBusyTab
             else
             {
                 DriveScanner.WriteCsv(result.Files, outPath);
+                // 적재 탭이 자동으로 이 경로를 제안할 수 있도록 publish.
+                var fullOut = Path.GetFullPath(outPath);
+                if (_scope == Scope.Hwp) ScanResultRegistry.SetHwp(fullOut);
+                else                     ScanResultRegistry.SetPdf(fullOut);
+
                 _log.AppendLine("\n" + new string('=', 60));
                 _log.AppendLine($"  완료: 총 {result.Files.Count:N0}개 파일  ({sw.Elapsed.TotalSeconds:F1}초)");
                 var byExt = result.Files.GroupBy(f => f.Extension).OrderBy(g => g.Key);
