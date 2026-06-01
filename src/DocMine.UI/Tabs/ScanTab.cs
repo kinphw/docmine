@@ -22,6 +22,13 @@ public sealed class ScanTab : TabPage, IBusyTab
     private readonly Button _startBtn;
     private CancellationTokenSource? _cts;
 
+    // ─ 스캔 범위 모드: 드라이브 vs 단일 폴더(하위 포함) ──────────────
+    private readonly RadioButton _modeDrive;
+    private readonly RadioButton _modeFolder;
+    private readonly Panel _drivePanel;
+    private readonly Panel _folderPanel;
+    private readonly TextBox _folderBox;
+
     public ScanTab(Scope scope) : base(scope == Scope.Hwp ? "① HWP 스캔" : "① PDF 스캔")
     {
         _scope = scope;
@@ -65,17 +72,45 @@ public sealed class ScanTab : TabPage, IBusyTab
         extGroup.Controls.Add(extFlow);
         root.Controls.Add(extGroup, 0, 0);
 
-        // ── 드라이브 그룹 ────────────────────────────────────────────
-        var driveGroup = new GroupBox
+        // ── 스캔 대상 그룹 (드라이브 모드 | 단일 폴더 모드) ──────────
+        var scopeGroup = new GroupBox
         {
-            Text = "스캔 대상 드라이브",
+            Text = "스캔 대상",
             Dock = DockStyle.Top,
             AutoSize = true,
             Padding = new Padding(8),
         };
+        var scopeContainer = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 3,
+        };
+        scopeContainer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        scopeContainer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        scopeContainer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        // 모드 라디오.
+        var modeRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
+        _modeDrive = new RadioButton
+        {
+            Text = "전체 드라이브 (체크된 항목)",
+            Checked = true, AutoSize = true,
+        };
+        _modeFolder = new RadioButton
+        {
+            Text = "특정 폴더 (하위 포함)",
+            AutoSize = true, Margin = new Padding(16, 0, 0, 0),
+        };
+        _modeDrive.CheckedChanged += (_, _) => UpdateScopeVisibility();
+        _modeFolder.CheckedChanged += (_, _) => UpdateScopeVisibility();
+        modeRow.Controls.Add(_modeDrive);
+        modeRow.Controls.Add(_modeFolder);
+        scopeContainer.Controls.Add(modeRow, 0, 0);
+
+        // 드라이브 모드 패널.
+        _drivePanel = new Panel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(0, 4, 0, 0) };
         var driveFlow = new FlowLayoutPanel
         {
-            Dock = DockStyle.Fill, AutoSize = true,
+            Dock = DockStyle.Top, AutoSize = true,
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
         };
@@ -103,7 +138,6 @@ public sealed class ScanTab : TabPage, IBusyTab
             _driveBoxes.Add((cb, d.Root));
             driveFlow.Controls.Add(cb);
         }
-
         var quickFlow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
         var allOn  = new Button { Text = "전체 선택", AutoSize = true };
         var allOff = new Button { Text = "전체 해제", AutoSize = true };
@@ -112,8 +146,28 @@ public sealed class ScanTab : TabPage, IBusyTab
         quickFlow.Controls.Add(allOn);
         quickFlow.Controls.Add(allOff);
         driveFlow.Controls.Add(quickFlow);
-        driveGroup.Controls.Add(driveFlow);
-        root.Controls.Add(driveGroup, 0, 1);
+        _drivePanel.Controls.Add(driveFlow);
+        scopeContainer.Controls.Add(_drivePanel, 0, 1);
+
+        // 폴더 모드 패널 — 초기에는 숨김.
+        _folderPanel = new Panel { Dock = DockStyle.Top, AutoSize = true, Visible = false, Padding = new Padding(0, 4, 0, 0) };
+        var folderRow = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2 };
+        folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        _folderBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Anchor = AnchorStyles.Left | AnchorStyles.Right,
+        };
+        var folderBrowseBtn = new Button { Text = "폴더 선택…", AutoSize = true };
+        folderBrowseBtn.Click += (_, _) => BrowseFolder();
+        folderRow.Controls.Add(_folderBox, 0, 0);
+        folderRow.Controls.Add(folderBrowseBtn, 1, 0);
+        _folderPanel.Controls.Add(folderRow);
+        scopeContainer.Controls.Add(_folderPanel, 0, 2);
+
+        scopeGroup.Controls.Add(scopeContainer);
+        root.Controls.Add(scopeGroup, 0, 1);
 
         // ── 출력 CSV ────────────────────────────────────────────────
         var outGroup = new GroupBox
@@ -160,6 +214,25 @@ public sealed class ScanTab : TabPage, IBusyTab
         foreach (var (cb, _) in _driveBoxes) cb.Checked = value;
     }
 
+    private void UpdateScopeVisibility()
+    {
+        _drivePanel.Visible  = _modeDrive.Checked;
+        _folderPanel.Visible = _modeFolder.Checked;
+    }
+
+    private void BrowseFolder()
+    {
+        using var dlg = new FolderBrowserDialog
+        {
+            Description = "스캔할 폴더 선택 (하위 폴더 포함)",
+            ShowNewFolderButton = false,
+        };
+        if (!string.IsNullOrEmpty(_folderBox.Text) && Directory.Exists(_folderBox.Text))
+            dlg.SelectedPath = _folderBox.Text;
+        if (dlg.ShowDialog(this) == DialogResult.OK)
+            _folderBox.Text = dlg.SelectedPath;
+    }
+
     private void BrowseOut()
     {
         using var dlg = new SaveFileDialog
@@ -176,12 +249,32 @@ public sealed class ScanTab : TabPage, IBusyTab
     private async Task OnStartAsync()
     {
         var label = _scope == Scope.Hwp ? "HWP" : "PDF";
-        var drives = _driveBoxes.Where(p => p.Box.Checked).Select(p => p.Path).ToList();
-        if (drives.Count == 0)
+
+        // 모드별 root 결정.
+        List<string> roots;
+        string scopeDesc;
+        if (_modeFolder.Checked)
         {
-            MessageBox.Show(this, "스캔할 드라이브를 하나 이상 선택하세요.", "드라이브 선택");
-            return;
+            var folder = _folderBox.Text.Trim();
+            if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder))
+            {
+                MessageBox.Show(this, "스캔할 폴더를 선택하세요 (유효한 경로).", "폴더 선택");
+                return;
+            }
+            roots = new List<string> { folder };
+            scopeDesc = $"폴더: {Path.GetFullPath(folder)}";
         }
+        else
+        {
+            roots = _driveBoxes.Where(p => p.Box.Checked).Select(p => p.Path).ToList();
+            if (roots.Count == 0)
+            {
+                MessageBox.Show(this, "스캔할 드라이브를 하나 이상 선택하세요.", "드라이브 선택");
+                return;
+            }
+            scopeDesc = $"드라이브: {string.Join(", ", roots)}";
+        }
+
         var exts = _extBoxes.Where(p => p.Box.Checked).Select(p => p.Ext).ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (exts.Count == 0)
         {
@@ -200,9 +293,9 @@ public sealed class ScanTab : TabPage, IBusyTab
         _log.Clear();
         _log.AppendLine("=" + new string('=', 60));
         _log.AppendLine($"  Step 1 — {label} 파일 스캐너");
-        _log.AppendLine($"  대상 드라이브: {string.Join(", ", drives)}");
-        _log.AppendLine($"  대상 확장자  : {string.Join(", ", exts.OrderBy(s => s))}");
-        _log.AppendLine($"  출력 파일    : {Path.GetFullPath(outPath)}");
+        _log.AppendLine($"  대상       : {scopeDesc}");
+        _log.AppendLine($"  대상 확장자: {string.Join(", ", exts.OrderBy(s => s))}");
+        _log.AppendLine($"  출력 파일  : {Path.GetFullPath(outPath)}");
         _log.AppendLine("=" + new string('=', 60));
 
         _cts = new CancellationTokenSource();
@@ -217,7 +310,7 @@ public sealed class ScanTab : TabPage, IBusyTab
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
             var result = await Task.Run(() => DriveScanner.Scan(
-                drives, exts,
+                roots, exts,
                 onProgress:    n => _log.AppendLine($"    ... {n:N0}개 발견"),
                 onRootStart:   r => _log.AppendLine($"\n  [{r}] 스캔 시작..."),
                 // 라이브 라인 — milestone 메시지가 들어오면 AppendLine 이 확정시키므로
