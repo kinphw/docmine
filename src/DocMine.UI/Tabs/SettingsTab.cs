@@ -25,7 +25,7 @@ public sealed class SettingsTab : TabPage
     private readonly Label _statusLabel;
     private readonly ListBox _excludeList;
 
-    public SettingsTab() : base("⑤ 설정")
+    public SettingsTab() : base("⑥ 설정")
     {
         _data = UserSettings.Load();
 

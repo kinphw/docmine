@@ -43,9 +43,14 @@ public sealed class SearchTab : TabPage
     private readonly CheckBox _includeExcludedBox;
     private readonly CheckBox _idFilterBox;
     private readonly TextBox _idMinBox, _idMaxBox;
+    private readonly CheckBox _showParsedAtBox;   // 우상단 — 적재일 컬럼 표시 토글
+
+    // ListView 컬럼 인덱스 — 한 곳에서 관리 (적재일 컬럼 삽입으로 미리보기가 밀림).
+    private const int ColId = 0, ColDir = 1, ColFile = 2, ColParsedAt = 3, ColPreview = 4;
 
     // 결과 ListView + 로그
     private readonly ListView _list;
+    private ColumnHeader _parsedAtCol = null!;    // 적재일 컬럼 — width 토글로 표시/숨김
     private readonly LogPane _log;
 
     // 하단 버튼
@@ -94,8 +99,10 @@ public sealed class SearchTab : TabPage
         // collapse 되는 케이스가 있어, 절대 잘리지 않는 Dock=Bottom 패턴을 쓴다.
 
         // ─ 상단 검색 컨트롤 ────────────────────────────────────────────
-        var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 2 };
+        // 2열: 0열 = 검색 컨트롤(row1/row2), 1열 = 우상단 '적재일 표시' 체크박스.
+        var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 2 };
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
         var row1 = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
         row1.Controls.Add(new Label { Text = "키워드:", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
@@ -146,6 +153,19 @@ public sealed class SearchTab : TabPage
         row2.Controls.Add(_idMaxBox);
 
         top.Controls.Add(row2, 0, 1);
+
+        // 우상단 — 적재일(최종 파싱 시각) 컬럼 표시 토글. 기본 비체크.
+        _showParsedAtBox = new CheckBox
+        {
+            Text = "적재일 표시",
+            AutoSize = true,
+            Checked = false,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            Margin = new Padding(12, 6, 0, 0),
+        };
+        _showParsedAtBox.CheckedChanged += (_, _) => ToggleParsedAtColumn();
+        top.Controls.Add(_showParsedAtBox, 1, 0);
+
         root.Controls.Add(top, 0, 0);
 
         // ─ 결과 ListView ──────────────────────────────────────────────
@@ -163,6 +183,8 @@ public sealed class SearchTab : TabPage
         _list.Columns.Add("ID",              50);
         _list.Columns.Add("폴더",           300);
         _list.Columns.Add("파일명",         280);
+        // 적재일 — 기본 width 0(숨김). '적재일 표시' 체크 시 ToggleParsedAtColumn 으로 확장.
+        _parsedAtCol = _list.Columns.Add("적재일", 0);
         _list.Columns.Add("내용 미리보기",  500);
         _list.DoubleClick += (_, _) => OpenSelectedFile();
         _list.SelectedIndexChanged += (_, _) => OnSelectionChanged();
@@ -387,8 +409,10 @@ public sealed class SearchTab : TabPage
                 var previewFull = isExcluded ? "" : SearchService.ExtractSnippet(r.BodyChunk, kws);
                 var previewShort = previewFull.Length > 150 ? previewFull[..150] + "…" : previewFull;
                 var fnShort = r.Filename.Length > 53 ? r.Filename[..50] + "…" : r.Filename;
+                var parsedAtStr = r.ParsedAt?.ToString("yyyy-MM-dd HH:mm") ?? "";
 
-                var item = new ListViewItem(new[] { r.Id.ToString(), r.Directory, fnShort, previewShort })
+                // subitem 순서 = 컬럼 순서 (ID, 폴더, 파일명, 적재일, 미리보기).
+                var item = new ListViewItem(new[] { r.Id.ToString(), r.Directory, fnShort, parsedAtStr, previewShort })
                 {
                     Tag = new FullRow(r.Id, r.Directory, r.Filename, previewFull),
                     UseItemStyleForSubItems = true,
@@ -431,6 +455,10 @@ public sealed class SearchTab : TabPage
         _idMinBox.Enabled = _idFilterBox.Checked;
         _idMaxBox.Enabled = _idFilterBox.Checked;
     }
+
+    // 적재일 컬럼은 항상 데이터가 채워져 있고 width 만 토글 — 재검색 불필요.
+    private void ToggleParsedAtColumn()
+        => _parsedAtCol.Width = _showParsedAtBox.Checked ? 140 : 0;
 
     private void OnSelectionChanged()
     {
@@ -628,9 +656,9 @@ public sealed class SearchTab : TabPage
 
         switch (subIdx)
         {
-            case 1: menu.Items.Add("폴더 경로 복사", null, (_, _) => CopyField(1)); menu.Items.Add(new ToolStripSeparator()); break;
-            case 2: menu.Items.Add("파일명 복사",     null, (_, _) => CopyField(2)); menu.Items.Add(new ToolStripSeparator()); break;
-            case 3: menu.Items.Add("내용 미리보기 복사", null, (_, _) => CopyField(3)); menu.Items.Add(new ToolStripSeparator()); break;
+            case ColDir:     menu.Items.Add("폴더 경로 복사",   null, (_, _) => CopyField(ColDir));     menu.Items.Add(new ToolStripSeparator()); break;
+            case ColFile:    menu.Items.Add("파일명 복사",       null, (_, _) => CopyField(ColFile));    menu.Items.Add(new ToolStripSeparator()); break;
+            case ColPreview: menu.Items.Add("내용 미리보기 복사", null, (_, _) => CopyField(ColPreview)); menu.Items.Add(new ToolStripSeparator()); break;
         }
 
         var singleSel = _list.SelectedItems.Count == 1;
@@ -656,10 +684,10 @@ public sealed class SearchTab : TabPage
             var r = (FullRow)it.Tag!;
             vals.Add(fieldIdx switch
             {
-                1 => r.Directory,
-                2 => r.Filename,
-                3 => r.PreviewFull,
-                _ => r.Id.ToString(),
+                ColDir     => r.Directory,
+                ColFile    => r.Filename,
+                ColPreview => r.PreviewFull,
+                _          => r.Id.ToString(),
             });
         }
         try
@@ -697,15 +725,15 @@ public sealed class SearchTab : TabPage
         var row = (FullRow)hit.Item.Tag!;
         var text = subIdx switch
         {
-            1 => row.Directory,
-            2 => row.Filename,
-            3 => row.PreviewFull,
-            _ => "",
+            ColDir     => row.Directory,
+            ColFile    => row.Filename,
+            ColPreview => row.PreviewFull,
+            _          => "",
         };
         if (string.IsNullOrEmpty(text) || text.Length < 30) return;
         if (text.Length > 800) text = text[..800] + " …";
 
-        var kws = subIdx == 3
+        var kws = subIdx == ColPreview
             ? SearchService.PrepareKeywords(_lastKw, _lastMode)
             : Array.Empty<string>();
 

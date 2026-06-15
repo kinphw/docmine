@@ -3,6 +3,8 @@
 // UI 무의존 — search_gui.App 분리 시 _compose_where / _extract_snippet / search /
 // count_results 를 그대로 끌어왔다. 단위 테스트 대상이 이 클래스에 모임.
 
+using System.Globalization;
+using System.Text;
 using MySqlConnector;
 using DocMine.Core.Config;
 
@@ -15,7 +17,19 @@ public sealed record SearchRow(
     int    Id,
     string Directory,
     string Filename,
-    string? BodyChunk);  // NULL/빈 = 제외 항목
+    string? BodyChunk,       // NULL/빈 = 제외 항목
+    DateTime? ParsedAt);     // 최종 적재(파싱) 시각 — documents.parsed_at
+
+// DB 추출(⑤) 전용 — body_text 제외한 메타데이터 전체 컬럼.
+public sealed record ExportRow(
+    int       Id,
+    string    Directory,
+    string    Filename,
+    string    Extension,
+    long      FileSize,
+    string?   FileMtime,
+    string    ParseStatus,
+    DateTime? ParsedAt);
 
 public sealed class SearchService
 {
@@ -79,7 +93,8 @@ public sealed class SearchService
     // (sql, params) 반환. 호출자가 prefix(SELECT/COUNT) + suffix(ORDER BY/LIMIT) 붙임.
     public (string WhereSql, IReadOnlyList<object> Params) ComposeWhere(
         string keyword, SearchTarget target, SearchMode mode,
-        bool includeExcluded, int? idMin = null, int? idMax = null)
+        bool includeExcluded, int? idMin = null, int? idMax = null,
+        DateTime? parsedFrom = null, DateTime? parsedTo = null)
     {
         var keywords = PrepareKeywords(keyword, mode);
         var conds = new List<string>();
@@ -117,6 +132,10 @@ public sealed class SearchService
         if (idMin is not null) { conds.Add("id >= ?"); prms.Add(idMin.Value); }
         if (idMax is not null) { conds.Add("id <= ?"); prms.Add(idMax.Value); }
 
+        // 적재일 범위 — 호출자가 To 를 '다음날 00:00' 으로 넘기면 그날 전체 포함 (반열림 구간).
+        if (parsedFrom is not null) { conds.Add("parsed_at >= ?"); prms.Add(parsedFrom.Value); }
+        if (parsedTo   is not null) { conds.Add("parsed_at <  ?"); prms.Add(parsedTo.Value); }
+
         var whereSql = conds.Count == 0 ? "" : " WHERE " + string.Join(" AND ", conds);
         return (whereSql, prms);
     }
@@ -125,13 +144,14 @@ public sealed class SearchService
     public IReadOnlyList<SearchRow> Search(
         string keyword, SearchTarget target, SearchMode mode,
         int limit = PageSize, int offset = 0,
-        bool includeExcluded = false, int? idMin = null, int? idMax = null)
+        bool includeExcluded = false, int? idMin = null, int? idMax = null,
+        DateTime? parsedFrom = null, DateTime? parsedTo = null)
     {
-        var (whereSql, prms) = ComposeWhere(keyword, target, mode, includeExcluded, idMin, idMax);
+        var (whereSql, prms) = ComposeWhere(keyword, target, mode, includeExcluded, idMin, idMax, parsedFrom, parsedTo);
         // body_text 5000자까지만 가져와서 클라이언트 스니펫 추출. 200건 × 5KB ≈ 1MB.
         // 5000 자 내 키워드 없으면 ExtractSnippet 이 앞부분 폴백.
         var sql = $@"
-            SELECT id, directory, filename, LEFT(body_text, 5000)
+            SELECT id, directory, filename, LEFT(body_text, 5000), parsed_at
             FROM `{_cfg.DbTable}`
             {whereSql}
             ORDER BY id
@@ -152,16 +172,18 @@ public sealed class SearchService
                 Id:        rdr.GetInt32(0),
                 Directory: rdr.GetString(1),
                 Filename:  rdr.GetString(2),
-                BodyChunk: rdr.IsDBNull(3) ? null : rdr.GetString(3)));
+                BodyChunk: rdr.IsDBNull(3) ? null : rdr.GetString(3),
+                ParsedAt:  rdr.IsDBNull(4) ? null : rdr.GetDateTime(4)));
         }
         return rows;
     }
 
     public int CountResults(
         string keyword, SearchTarget target, SearchMode mode,
-        bool includeExcluded = false, int? idMin = null, int? idMax = null)
+        bool includeExcluded = false, int? idMin = null, int? idMax = null,
+        DateTime? parsedFrom = null, DateTime? parsedTo = null)
     {
-        var (whereSql, prms) = ComposeWhere(keyword, target, mode, includeExcluded, idMin, idMax);
+        var (whereSql, prms) = ComposeWhere(keyword, target, mode, includeExcluded, idMin, idMax, parsedFrom, parsedTo);
         var sql = $"SELECT COUNT(*) FROM `{_cfg.DbTable}`{whereSql}";
 
         using var conn = new DocumentRepository(_cfg).OpenConnection();
@@ -170,5 +192,74 @@ public sealed class SearchService
         foreach (var p in prms) cmd.Parameters.Add(new MySqlParameter { Value = p });
         var result = cmd.ExecuteScalar();
         return result is null or DBNull ? 0 : Convert.ToInt32(result);
+    }
+
+    // ─ DB 추출(⑤) 전용 — 메타데이터 전체 컬럼, body_text 제외 ─────────
+    /// <summary>검색 조건에 맞는 행을 메타데이터 컬럼으로 추출 (CSV 출력용).
+    /// body_text 는 가져오지 않음. limit 은 메모리 폭주 방지 안전 상한.</summary>
+    public IReadOnlyList<ExportRow> SearchForExport(
+        string keyword, SearchTarget target, SearchMode mode,
+        bool includeExcluded = false, int? idMin = null, int? idMax = null,
+        DateTime? parsedFrom = null, DateTime? parsedTo = null,
+        int limit = 200_000)
+    {
+        var (whereSql, prms) = ComposeWhere(keyword, target, mode, includeExcluded, idMin, idMax, parsedFrom, parsedTo);
+        var sql = $@"
+            SELECT id, directory, filename, extension, file_size, file_mtime, parse_status, parsed_at
+            FROM `{_cfg.DbTable}`
+            {whereSql}
+            ORDER BY id
+            LIMIT ?";
+
+        using var conn = new DocumentRepository(_cfg).OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        foreach (var p in prms) cmd.Parameters.Add(new MySqlParameter { Value = p });
+        cmd.Parameters.Add(new MySqlParameter { Value = limit });
+
+        var rows = new List<ExportRow>();
+        using var rdr = cmd.ExecuteReader();
+        while (rdr.Read())
+        {
+            rows.Add(new ExportRow(
+                Id:          rdr.GetInt32(0),
+                Directory:   rdr.GetString(1),
+                Filename:    rdr.GetString(2),
+                Extension:   rdr.IsDBNull(3) ? "" : rdr.GetString(3),
+                FileSize:    rdr.IsDBNull(4) ? 0  : rdr.GetInt64(4),
+                FileMtime:   rdr.IsDBNull(5) ? null : rdr.GetString(5),
+                ParseStatus: rdr.IsDBNull(6) ? "" : rdr.GetString(6),
+                ParsedAt:    rdr.IsDBNull(7) ? null : rdr.GetDateTime(7)));
+        }
+        return rows;
+    }
+
+    /// <summary>ExportRow 목록을 CSV 로 저장 — DriveScanner.WriteCsv 와 동일한
+    /// utf-8-sig BOM 포맷. 컬럼: id,directory,filename,extension,size_bytes,
+    /// modified,parse_status,parsed_at.</summary>
+    public static void WriteExportCsv(IEnumerable<ExportRow> rows, string outPath)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
+        using var w = new StreamWriter(outPath, append: false,
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        w.WriteLine("id,directory,filename,extension,size_bytes,modified,parse_status,parsed_at");
+        foreach (var r in rows)
+        {
+            w.Write(r.Id.ToString(CultureInfo.InvariantCulture));     w.Write(',');
+            w.Write(CsvEscape(r.Directory));                          w.Write(',');
+            w.Write(CsvEscape(r.Filename));                           w.Write(',');
+            w.Write(CsvEscape(r.Extension));                          w.Write(',');
+            w.Write(r.FileSize.ToString(CultureInfo.InvariantCulture)); w.Write(',');
+            w.Write(CsvEscape(r.FileMtime ?? ""));                    w.Write(',');
+            w.Write(CsvEscape(r.ParseStatus));                        w.Write(',');
+            w.Write(CsvEscape(r.ParsedAt?.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) ?? ""));
+            w.Write("\r\n");
+        }
+    }
+
+    private static string CsvEscape(string s)
+    {
+        if (s.IndexOfAny(new[] { ',', '"', '\r', '\n' }) < 0) return s;
+        return "\"" + s.Replace("\"", "\"\"") + "\"";
     }
 }

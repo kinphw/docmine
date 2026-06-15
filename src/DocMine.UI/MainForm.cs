@@ -2,7 +2,7 @@
 //
 // 구성:
 //   상단 바: About(?) 버튼 — 우상단
-//   본체:    7탭 TabControl (Fill)
+//   본체:    8탭 TabControl (Fill)
 //
 // 종료 처리 (FormClosing):
 //   - 비동기 작업(스캔/적재/추출) 진행 중이면 확인 다이얼로그
@@ -47,6 +47,7 @@ public sealed class MainForm : Form
         _tabs.TabPages.Add(new PdfInsertTab());
         _tabs.TabPages.Add(new SearchTab());
         _tabs.TabPages.Add(new ExtractorTab());
+        _tabs.TabPages.Add(new DbExportTab());
         _settingsTab = new SettingsTab();
         _tabs.TabPages.Add(_settingsTab);
         Controls.Add(_tabs);
