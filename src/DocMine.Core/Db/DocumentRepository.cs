@@ -7,8 +7,10 @@
 //
 // 적재 단계는 Phase 3/4 에서 추가. Phase 2 는 검색·DDL·진단만 사용.
 
+using System.Text;
 using MySqlConnector;
 using DocMine.Core.Config;
+using DocMine.Core.Pipeline;
 
 namespace DocMine.Core.Db;
 
@@ -147,6 +149,32 @@ CREATE TABLE IF NOT EXISTS `{_cfg.DbTable}` (
         var i = 0;
         foreach (var id in ids) cmd.Parameters.AddWithValue($"@id{i++}", id);
         return cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// DB 전체의 (directory, filename) 만 가벼운 CSV 로 덤프 — 적재 현황 manifest.
+    /// body_text 제외라 수십만 행도 수 MB. 환경2(법률검토)에서 뽑아 환경1 로 옮긴 뒤
+    /// DbExportTab 에서 '이미 환경2 에 적재된 파일' 대조에 사용. 반환값 = 행 수.
+    /// </summary>
+    public int ExportManifestCsv(string outPath)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
+        using var w = new StreamWriter(outPath, append: false,
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        w.WriteLine("directory,filename");
+
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT directory, filename FROM `{_cfg.DbTable}` ORDER BY directory, filename";
+        using var rdr = cmd.ExecuteReader();
+        var n = 0;
+        while (rdr.Read())
+        {
+            w.Write(CsvIngestHelpers.CsvEscape(rdr.GetString(0))); w.Write(',');
+            w.Write(CsvIngestHelpers.CsvEscape(rdr.GetString(1))); w.Write("\r\n");
+            n++;
+        }
+        return n;
     }
 
     /// <summary>레코드 자체를 DB 에서 완전히 삭제.</summary>

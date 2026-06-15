@@ -130,4 +130,38 @@ public static class CsvIngestHelpers
         }
         return existing;
     }
+
+    /// <summary>
+    /// 적재 현황 manifest CSV(directory,filename 2컬럼) → NormKey 집합.
+    /// 환경2 DB 에서 ExportManifestCsv 로 뽑은 파일을 환경1 에서 대조할 때 사용.
+    /// 컬럼명으로 매핑하므로 추가 컬럼이 있어도 directory/filename 만 읽는다.
+    /// </summary>
+    public static HashSet<(string, string)> LoadManifestKeys(string csvPath)
+    {
+        var set = new HashSet<(string, string)>();
+        using var reader = new StreamReader(csvPath, new System.Text.UTF8Encoding(true));
+        var header = reader.ReadLine();
+        if (header is null) return set;
+
+        var cols = header.Split(',')
+            .Select((c, i) => (Name: c.Trim().Trim('﻿'), Idx: i))
+            .ToDictionary(p => p.Name, p => p.Idx, StringComparer.OrdinalIgnoreCase);
+        var iDir = cols.TryGetValue("directory", out var a) ? a : 0;
+        var iFn  = cols.TryGetValue("filename",  out var b) ? b : 1;
+
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            var parts = ParseCsvLine(line);
+            if (parts.Count <= Math.Max(iDir, iFn)) continue;
+            set.Add(NormKey(parts[iDir], parts[iFn]));
+        }
+        return set;
+    }
+
+    /// <summary>CSV 필드 escape — 콤마/따옴표/개행 포함 시 따옴표로 감싸고 내부 따옴표 중복.</summary>
+    public static string CsvEscape(string s)
+        => s.IndexOfAny(new[] { ',', '"', '\r', '\n' }) < 0
+            ? s
+            : "\"" + s.Replace("\"", "\"\"") + "\"";
 }
