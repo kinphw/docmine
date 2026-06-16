@@ -3,16 +3,19 @@
   <!--
     DocMine.UI — 단일 진입점 (Python pythonw.exe + mp.Process 패턴 1:1).
 
-    ★ AssemblyName=python — DRM 화이트리스트 우회 필수.
-      운영환경 DRM 솔루션(Fasoo·MarkAny 등) 이 프로세스 basename 으로
-      파일 I/O 허용 여부를 판정하므로, 발행 산출물 이름이 정확히
-      'python.exe' 여야 PDF 등 파일 접근이 허용됨.
+    ★ AssemblyName=docmine — 개발 산출물은 docmine.exe (식별 편의).
+      단, 운영환경 DRM 솔루션(Fasoo·MarkAny 등) 은 프로세스 basename 으로
+      파일 I/O 허용을 판정하므로 *배포 zip* 은 python.exe 로 rename 한다
+      (make_release_cs.ps1). PDF 등 보호 파일 접근이 'python.exe' 여야 허용됨.
+      → 개발: docmine.exe / 배포: python.exe (같은 바이너리, 이름만 다름).
+      워커 spawn 은 Environment.ProcessPath(자기 자신)라 파일명과 무관하게 동작.
 
     단일 binary 다중 인스턴스:
       ㆍ args 없음 / GUI args ⇒ MainForm (WinForms)
       ㆍ args == "[hyphen][hyphen]hwp-worker" ⇒ HwpWorkerEntry.Run (콘솔 STDIO 루프)
       Python 의 mp.Process(worker_main) 가 같은 인터프리터 바이너리를
-      spawn 하는 패턴과 동일. 산출 파일은 python.exe 한 개로 모든 역할.
+      spawn 하는 패턴과 동일. 산출 파일 한 개(개발 docmine.exe / 배포
+      python.exe)로 모든 역할.
 
     publish 옵션:
       FDD (.NET 8 런타임 가정, 가장 가벼움):
@@ -26,7 +29,7 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <UseWindowsForms>true</UseWindowsForms>
-    <AssemblyName>python</AssemblyName>
+    <AssemblyName>docmine</AssemblyName>
 
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PublishSingleFile>true</PublishSingleFile>

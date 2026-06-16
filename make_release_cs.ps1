@@ -45,10 +45,12 @@ if (-not $SkipBuild) {
 }
 
 # 3) 검증 ─────────────────────────────────────────────────────────
-$pythonExe   = Join-Path $PublishDir 'python.exe'
-if (-not (Test-Path $pythonExe)) { throw "산출물 없음: $pythonExe" }
-$pythonSize = [math]::Round((Get-Item $pythonExe).Length / 1MB, 2)
-Write-Host "  python.exe : $pythonSize MB"
+# 개발 산출물은 docmine.exe (AssemblyName=docmine). 배포 stage 로 옮길 때
+# python.exe 로 rename — DRM 화이트리스트 우회용 (csproj 주석 참조).
+$builtExe = Join-Path $PublishDir 'docmine.exe'
+if (-not (Test-Path $builtExe)) { throw "산출물 없음: $builtExe" }
+$exeSize = [math]::Round((Get-Item $builtExe).Length / 1MB, 2)
+Write-Host "  docmine.exe : $exeSize MB  → python.exe 로 재명명 패키징"
 
 # 4) stage 디렉토리 구성 ────────────────────────────────────────
 $stageName = "docmine_v$version"
@@ -56,7 +58,8 @@ $stageDir  = Join-Path $ReleaseRoot $stageName
 if (Test-Path $stageDir) { Remove-Item -Recurse -Force $stageDir }
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 
-Copy-Item $pythonExe $stageDir
+# docmine.exe → python.exe 로 이름 바꿔 복사.
+Copy-Item $builtExe (Join-Path $stageDir 'python.exe')
 
 # 동봉 문서 — 운영 환경 사용 가이드.
 $readme = @"
