@@ -17,8 +17,9 @@ namespace DocMine.UI.Tabs;
 
 public sealed class DbExportTab : TabPage
 {
-    private readonly SearchService _search;
-    private readonly DocumentRepository _repo;
+    // readonly 아님 — ⑥ 설정에서 DB/테이블 변경 시 탭 활성화마다 현재 설정으로 갱신.
+    private SearchService _search;
+    private DocumentRepository _repo;
 
     // ListView 컬럼 — '환경2 적재'를 ID 다음에 삽입.
     private const int ColId = 0, ColArchived = 1, ColDir = 2, ColFile = 3,
@@ -217,6 +218,16 @@ public sealed class DbExportTab : TabPage
 
         try { _repo.EnsureDatabase(); }
         catch (Exception ex) { _log.AppendLine($"[DB 경고] {ex.Message}"); }
+
+        // ⑥ 설정에서 DB/테이블을 바꿔도 반영되도록 탭 활성화마다 현재 설정으로 갱신.
+        VisibleChanged += (_, _) => { if (Visible) RefreshServices(); };
+    }
+
+    private void RefreshServices()
+    {
+        var cfg = AppConfig.Current;
+        _search = new SearchService(cfg);
+        _repo   = new DocumentRepository(cfg);
     }
 
     private SearchTarget GetTarget()
@@ -270,7 +281,7 @@ public sealed class DbExportTab : TabPage
             var dateLabel = _dateFilterBox.Checked
                 ? $" [적재일 {_dateFrom.Value:yyyy-MM-dd}~{_dateTo.Value:yyyy-MM-dd}]"
                 : "";
-            _log.AppendLine($"[검색] '{kw}'{dateLabel} → {rows.Count:N0}건");
+            _log.AppendLine($"[검색] '{kw}'{dateLabel} | table={AppConfig.Current.DbTable} → {rows.Count:N0}건");
             _statusLabel.Text = $"{rows.Count:N0}건";
             if (rows.Count >= 200_000)
                 _log.AppendLine("  ⚠ 안전 상한(200,000건) 도달 — 조건을 좁혀 다시 검색하세요.");

@@ -31,8 +31,9 @@ public sealed class SearchTab : TabPage
 {
     private sealed record FullRow(int Id, string Directory, string Filename, string PreviewFull);
 
-    private readonly SearchService _search;
-    private readonly DocumentRepository _repo;
+    // readonly 아님 — ⑥ 설정에서 DB/테이블 변경 시 탭 활성화마다 현재 설정으로 갱신.
+    private SearchService _search;
+    private DocumentRepository _repo;
 
     // 검색 컨트롤
     private readonly TextBox _keywordBox;
@@ -265,6 +266,17 @@ public sealed class SearchTab : TabPage
         _log.AppendLine($"  DB:       {cfg.DbUser}@{cfg.DbHost}:{cfg.DbPort}/{cfg.DbName} (table={cfg.DbTable})");
         try { _repo.EnsureDatabase(); }
         catch (Exception ex) { _log.AppendLine($"[DB 경고] {ex.Message}"); }
+
+        // ⑥ 설정에서 DB/테이블을 바꿔도 검색에 반영되도록, 탭이 보여질 때마다
+        // 현재 AppConfig 로 서비스 재생성 (기존엔 생성자 1회 캡처라 변경 무시됨).
+        VisibleChanged += (_, _) => { if (Visible) RefreshServices(); };
+    }
+
+    private void RefreshServices()
+    {
+        var cfg = AppConfig.Current;
+        _search = new SearchService(cfg);
+        _repo   = new DocumentRepository(cfg);
     }
 
     // ─ Ctrl+C / Ctrl+Insert / Del — 폼 단에서 가로채기 ───────────────
@@ -341,7 +353,7 @@ public sealed class SearchTab : TabPage
                 _ => $" [ID {idMin}~{idMax}]"
             };
             var exLabel = includeExcluded ? " [제외 포함]" : "";
-            _log.AppendLine($"[검색] '{kw}' | 대상: {target} | 방식: {modeLabel}{exLabel}{idLabel} → {_total:N0}건");
+            _log.AppendLine($"[검색] '{kw}' | 대상: {target} | 방식: {modeLabel}{exLabel}{idLabel} | table={AppConfig.Current.DbTable} → {_total:N0}건");
 
             var rows = await Task.Run(() => _search.Search(kw, target, mode,
                 offset: 0, includeExcluded: includeExcluded, idMin: idMin, idMax: idMax));
