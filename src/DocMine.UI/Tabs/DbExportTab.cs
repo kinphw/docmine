@@ -41,6 +41,10 @@ public sealed class DbExportTab : TabPage
     private readonly TextBox _manifestBox;
     private readonly Label _manifestStatus;
     private readonly CheckBox _lockArchivedBox;
+    private readonly CheckBox _excludeArchivedBox;   // 신규만 — 기적재 행을 결과에서 숨김
+
+    // 마지막 검색 결과 원본 — 토글/manifest 로드 시 재검색 없이 재필터링.
+    private IReadOnlyList<ExportRow> _lastResults = Array.Empty<ExportRow>();
 
     private readonly ListView _list;
     private ColumnHeader _archivedCol = null!;   // 환경2 적재 컬럼 — manifest 로드 시 표시
@@ -131,6 +135,9 @@ public sealed class DbExportTab : TabPage
         row4.Controls.Add(manifestLoad);
         _manifestStatus = new Label { Text = "(미로드)", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(8, 6, 0, 0) };
         row4.Controls.Add(_manifestStatus);
+        _excludeArchivedBox = new CheckBox { Text = "기적재 제외 (신규만)", AutoSize = true, Margin = new Padding(12, 4, 0, 0) };
+        _excludeArchivedBox.CheckedChanged += (_, _) => ReapplyView();
+        row4.Controls.Add(_excludeArchivedBox);
         _lockArchivedBox = new CheckBox { Text = "기적재 선택 잠금", AutoSize = true, Margin = new Padding(12, 4, 0, 0) };
         _lockArchivedBox.CheckedChanged += (_, _) => OnToggleLock();
         row4.Controls.Add(_lockArchivedBox);
@@ -257,6 +264,7 @@ public sealed class DbExportTab : TabPage
                 kw, target, mode, includeExcluded,
                 idMin: null, idMax: null, parsedFrom: pf, parsedTo: pt));
 
+            _lastResults = rows;
             FillList(rows);
 
             var dateLabel = _dateFilterBox.Checked
@@ -281,12 +289,17 @@ public sealed class DbExportTab : TabPage
 
     private void FillList(IReadOnlyList<ExportRow> rows)
     {
+        // '기적재 제외(신규만)' ON + manifest 로드됨 → 환경2 에 있는 행은 숨김.
+        var excludeArchived = _excludeArchivedBox.Checked && _manifest is not null;
+        var hidden = 0;
+
         _list.BeginUpdate();
         try
         {
             _list.Items.Clear();
             foreach (var r in rows)
             {
+                if (excludeArchived && IsArchived(r)) { hidden++; continue; }
                 var sizeStr = r.FileSize >= 1024 * 1024
                     ? $"{r.FileSize / 1024.0 / 1024.0:F1} MB"
                     : $"{r.FileSize / 1024.0:F0} KB";
@@ -308,11 +321,17 @@ public sealed class DbExportTab : TabPage
         {
             _list.EndUpdate();
         }
+        if (excludeArchived && hidden > 0)
+            _log.AppendLine($"  기적재 {hidden:N0}건 제외 — 신규 {_list.Items.Count:N0}건 표시");
+
         var any = _list.Items.Count > 0;
         _selectAllBtn.Enabled = any;
         _selectNoneBtn.Enabled = any;
         UpdateSelInfo();
     }
+
+    // 토글/manifest 로드 시 마지막 검색 결과를 현재 뷰 설정으로 재구성 (재검색 없음).
+    private void ReapplyView() => FillList(_lastResults);
 
     private void SetAllChecked(bool value)
     {
@@ -390,7 +409,7 @@ public sealed class DbExportTab : TabPage
             _manifestStatus.Text = $"기적재 {_manifest.Count:N0}건 로드됨";
             _manifestStatus.ForeColor = Color.SeaGreen;
             _archivedCol.Width = 60;
-            RefreshArchivedColumn();
+            ReapplyView();   // '환경2' 컬럼 채움 + (제외 토글 시) 신규만 필터
             _log.AppendLine($"[기적재 현황] {_manifest.Count:N0}건 로드 — {path}");
         }
         catch (Exception ex)
@@ -400,18 +419,6 @@ public sealed class DbExportTab : TabPage
             _manifestStatus.ForeColor = Color.Firebrick;
             MessageBox.Show(this, ex.Message, "기적재 현황 로드 실패");
         }
-    }
-
-    // 현재 표시된 행들의 '환경2' 컬럼을 manifest 기준으로 다시 채움 (재검색 불필요).
-    private void RefreshArchivedColumn()
-    {
-        _list.BeginUpdate();
-        try
-        {
-            foreach (ListViewItem it in _list.Items)
-                it.SubItems[ColArchived].Text = IsArchived((ExportRow)it.Tag!) ? "✓" : "";
-        }
-        finally { _list.EndUpdate(); }
     }
 
     private async Task ExportManifestAsync()
