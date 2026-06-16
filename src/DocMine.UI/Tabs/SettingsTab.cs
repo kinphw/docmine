@@ -220,9 +220,24 @@ public sealed class SettingsTab : TabPage
                     "CharSet=utf8mb4",
                     "Connection Timeout=5"));
             probe.Open();
+            // 입력한 DB/테이블이 실제 적용됐는지 — 그 테이블 레코드 수까지 보여준다.
+            // (DB·테이블만 바꾸고 연결만 OK 뜨면 어디에 붙었는지 확인이 안 됨)
+            string detail;
+            try
+            {
+                using var cmd = probe.CreateCommand();
+                cmd.CommandText = $"SELECT COUNT(*) FROM `{_data.DbTable}`";
+                var cnt = Convert.ToInt64(cmd.ExecuteScalar());
+                detail = $"{_data.DbName}.{_data.DbTable} : {cnt:N0}건";
+                _testResult.ForeColor = Color.SeaGreen;
+            }
+            catch
+            {
+                detail = $"{_data.DbName} 연결 OK — 테이블 '{_data.DbTable}' 없음/조회불가";
+                _testResult.ForeColor = Color.DarkOrange;
+            }
             probe.Dispose();
-            _testResult.Text = "✓ 연결 성공";
-            _testResult.ForeColor = Color.SeaGreen;
+            _testResult.Text = $"✓ {detail}";
         }
         catch (Exception ex)
         {
