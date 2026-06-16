@@ -304,29 +304,33 @@ public sealed class DbExportTab : TabPage
         var excludeArchived = _excludeArchivedBox.Checked && _manifest is not null;
         var hidden = 0;
 
+        // 아이템을 먼저 다 만든 뒤 AddRange 로 일괄 투입 — 개별 Items.Add 루프는
+        // 대량(수천~수만)에서 매번 내부 재계산이 일어나 매우 느리다.
+        var items = new List<ListViewItem>(rows.Count);
+        foreach (var r in rows)
+        {
+            var archived = IsArchived(r);
+            if (excludeArchived && archived) { hidden++; continue; }
+            var sizeStr = r.FileSize >= 1024 * 1024
+                ? $"{r.FileSize / 1024.0 / 1024.0:F1} MB"
+                : $"{r.FileSize / 1024.0:F0} KB";
+            var parsedStr = r.ParsedAt?.ToString("yyyy-MM-dd HH:mm:ss") ?? "";
+            // subitem 순서 = 컬럼 순서 (ID, 환경2, 폴더, 파일명, 확장자, 크기, 적재일, 상태).
+            items.Add(new ListViewItem(new[]
+            {
+                r.Id.ToString(), archived ? "✓" : "", r.Directory, r.Filename, r.Extension,
+                sizeStr, parsedStr, r.ParseStatus,
+            })
+            {
+                Tag = r,
+            });
+        }
+
         _list.BeginUpdate();
         try
         {
             _list.Items.Clear();
-            foreach (var r in rows)
-            {
-                if (excludeArchived && IsArchived(r)) { hidden++; continue; }
-                var sizeStr = r.FileSize >= 1024 * 1024
-                    ? $"{r.FileSize / 1024.0 / 1024.0:F1} MB"
-                    : $"{r.FileSize / 1024.0:F0} KB";
-                var parsedStr = r.ParsedAt?.ToString("yyyy-MM-dd HH:mm:ss") ?? "";
-                // subitem 순서 = 컬럼 순서 (ID, 환경2, 폴더, 파일명, 확장자, 크기, 적재일, 상태).
-                var archivedMark = IsArchived(r) ? "✓" : "";
-                var item = new ListViewItem(new[]
-                {
-                    r.Id.ToString(), archivedMark, r.Directory, r.Filename, r.Extension,
-                    sizeStr, parsedStr, r.ParseStatus,
-                })
-                {
-                    Tag = r,
-                };
-                _list.Items.Add(item);
-            }
+            _list.Items.AddRange(items.ToArray());
         }
         finally
         {
