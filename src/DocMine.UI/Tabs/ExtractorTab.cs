@@ -170,9 +170,15 @@ public sealed class ExtractorTab : TabPage, IBusyTab
             if (_modeFile.Checked)
                 dst = Path.ChangeExtension(src, ".txt");
             else
-                dst = Path.Combine(
-                    Path.GetDirectoryName(src) ?? "",
-                    (Path.GetFileName(src) ?? "extracted") + "_extracted.txt");
+            {
+                // 폴더 추출 — 결과 TXT 를 그 폴더 '안' 에 둔다. 기존엔 GetDirectoryName 이
+                // 폴더의 *상위* 를 반환해 한 단계 위에 저장되던 버그 (+ trailing '\' 유무로
+                // 동작이 갈렸음). trailing 슬래시를 정규화해 폴더명만 안전하게 뽑는다.
+                var name = Path.GetFileName(src.TrimEnd(
+                    Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                if (string.IsNullOrEmpty(name)) name = "extracted";  // 드라이브 루트 등
+                dst = Path.Combine(src, name + "_extracted.txt");
+            }
         }
         catch { return; }
 
