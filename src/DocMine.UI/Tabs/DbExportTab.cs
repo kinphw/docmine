@@ -27,7 +27,10 @@ public sealed class DbExportTab : TabPage
 
     // 환경2 적재 현황(manifest) — NormKey 집합. null = 미로드.
     private HashSet<(string, string)>? _manifest;
-    private bool _suppressItemCheck;   // SetAllChecked 중 ItemCheck 재진입 차단
+
+    // 가상화 — 표시 대상(필터 적용) + 체크 상태(ExportRow.Id 집합).
+    private readonly List<ExportRow> _viewRows = new();
+    private readonly HashSet<int> _checkedIds = new();
 
     private readonly TextBox _keywordBox;
     private readonly RadioButton _targetBoth, _targetTitle, _targetBody;
@@ -156,6 +159,7 @@ public sealed class DbExportTab : TabPage
             HideSelection = false,
             GridLines = false,
             Font = new Font("맑은 고딕", 9),
+            VirtualMode = true,  // 전체 결과를 _viewRows 에 두고 보이는 행만 렌더
         };
         _list.Columns.Add("ID",       50);
         // 환경2 적재 — manifest 로드 전엔 width 0(숨김), 로드 시 확장.
@@ -166,8 +170,10 @@ public sealed class DbExportTab : TabPage
         _list.Columns.Add("크기",     90, HorizontalAlignment.Right);
         _list.Columns.Add("적재일",  135);
         _list.Columns.Add("상태",     70);
-        _list.ItemCheck   += OnItemCheck;        // 체크 변경 '전' — 잠금 시 거부
-        _list.ItemChecked += (_, _) => UpdateSelInfo();
+        // VirtualMode: 체크 상태는 ListView 가 저장 안 하므로 _checkedIds 로 관리하고
+        // RetrieveVirtualItem 에서 복원. ItemCheck(변경 전)에서 잠금 거부 + 집합 갱신.
+        _list.RetrieveVirtualItem += OnRetrieveItem;
+        _list.ItemCheck += OnItemCheck;
         root.Controls.Add(_list, 0, 1);
 
         // ── 로그 ──────────────────────────────────────────────────────
@@ -298,48 +304,28 @@ public sealed class DbExportTab : TabPage
         }
     }
 
+    // 검색 결과/토글을 현재 뷰(_viewRows)로 구성 — 가상화라 Items 안 만들고
+    // VirtualListSize 만 세팅. 뷰가 바뀌면 체크 상태(_checkedIds)는 리셋.
     private void FillList(IReadOnlyList<ExportRow> rows)
     {
-        // '기적재 제외(신규만)' ON + manifest 로드됨 → 환경2 에 있는 행은 숨김.
         var excludeArchived = _excludeArchivedBox.Checked && _manifest is not null;
         var hidden = 0;
 
-        // 아이템을 먼저 다 만든 뒤 AddRange 로 일괄 투입 — 개별 Items.Add 루프는
-        // 대량(수천~수만)에서 매번 내부 재계산이 일어나 매우 느리다.
-        var items = new List<ListViewItem>(rows.Count);
+        _viewRows.Clear();
+        _checkedIds.Clear();
         foreach (var r in rows)
         {
-            var archived = IsArchived(r);
-            if (excludeArchived && archived) { hidden++; continue; }
-            var sizeStr = r.FileSize >= 1024 * 1024
-                ? $"{r.FileSize / 1024.0 / 1024.0:F1} MB"
-                : $"{r.FileSize / 1024.0:F0} KB";
-            var parsedStr = r.ParsedAt?.ToString("yyyy-MM-dd HH:mm:ss") ?? "";
-            // subitem 순서 = 컬럼 순서 (ID, 환경2, 폴더, 파일명, 확장자, 크기, 적재일, 상태).
-            items.Add(new ListViewItem(new[]
-            {
-                r.Id.ToString(), archived ? "✓" : "", r.Directory, r.Filename, r.Extension,
-                sizeStr, parsedStr, r.ParseStatus,
-            })
-            {
-                Tag = r,
-            });
+            if (excludeArchived && IsArchived(r)) { hidden++; continue; }
+            _viewRows.Add(r);
         }
 
-        _list.BeginUpdate();
-        try
-        {
-            _list.Items.Clear();
-            _list.Items.AddRange(items.ToArray());
-        }
-        finally
-        {
-            _list.EndUpdate();
-        }
+        _list.VirtualListSize = _viewRows.Count;
+        _list.Invalidate();
+
         if (excludeArchived && hidden > 0)
-            _log.AppendLine($"  기적재 {hidden:N0}건 제외 — 신규 {_list.Items.Count:N0}건 표시");
+            _log.AppendLine($"  기적재 {hidden:N0}건 제외 — 신규 {_viewRows.Count:N0}건 표시");
 
-        var any = _list.Items.Count > 0;
+        var any = _viewRows.Count > 0;
         _selectAllBtn.Enabled = any;
         _selectNoneBtn.Enabled = any;
         UpdateSelInfo();
@@ -348,20 +334,40 @@ public sealed class DbExportTab : TabPage
     // 토글/manifest 로드 시 마지막 검색 결과를 현재 뷰 설정으로 재구성 (재검색 없음).
     private void ReapplyView() => FillList(_lastResults);
 
+    // VirtualMode — 보이는 행만 on-demand 생성. 체크 상태는 _checkedIds 로 복원.
+    private void OnRetrieveItem(object? sender, RetrieveVirtualItemEventArgs e)
+    {
+        if (e.ItemIndex < 0 || e.ItemIndex >= _viewRows.Count)
+        {
+            e.Item = new ListViewItem("");
+            return;
+        }
+        var r = _viewRows[e.ItemIndex];
+        var sizeStr = r.FileSize >= 1024 * 1024
+            ? $"{r.FileSize / 1024.0 / 1024.0:F1} MB"
+            : $"{r.FileSize / 1024.0:F0} KB";
+        var parsedStr = r.ParsedAt?.ToString("yyyy-MM-dd HH:mm:ss") ?? "";
+        // subitem 순서 = 컬럼 순서 (ID, 환경2, 폴더, 파일명, 확장자, 크기, 적재일, 상태).
+        e.Item = new ListViewItem(new[]
+        {
+            r.Id.ToString(), IsArchived(r) ? "✓" : "", r.Directory, r.Filename, r.Extension,
+            sizeStr, parsedStr, r.ParseStatus,
+        })
+        {
+            Checked = _checkedIds.Contains(r.Id),
+        };
+    }
+
     private void SetAllChecked(bool value)
     {
-        // 잠금 ON 이면 '전체 선택' 은 신규(미적재)만 체크. ItemCheck 재진입은 suppress 로 차단.
-        _suppressItemCheck = true;
-        _list.BeginUpdate();
-        try
+        _checkedIds.Clear();
+        if (value)
         {
-            foreach (ListViewItem it in _list.Items)
-            {
-                var allow = value && !(_lockArchivedBox.Checked && IsArchived((ExportRow)it.Tag!));
-                it.Checked = allow;
-            }
+            // 잠금 ON 이면 신규(미적재)만 체크.
+            foreach (var r in _viewRows)
+                if (!(_lockArchivedBox.Checked && IsArchived(r))) _checkedIds.Add(r.Id);
         }
-        finally { _list.EndUpdate(); _suppressItemCheck = false; }
+        _list.Invalidate();   // 체크 표시 다시 그림
         UpdateSelInfo();
     }
 
@@ -371,30 +377,29 @@ public sealed class DbExportTab : TabPage
 
     private void OnItemCheck(object? sender, ItemCheckEventArgs e)
     {
-        if (_suppressItemCheck) return;
-        // 잠금 ON 상태에서 기적재 행을 체크하려 하면 거부.
-        if (e.NewValue == CheckState.Checked && _lockArchivedBox.Checked
-            && IsArchived((ExportRow)_list.Items[e.Index].Tag!))
+        if (e.Index < 0 || e.Index >= _viewRows.Count) return;
+        var r = _viewRows[e.Index];
+        if (e.NewValue == CheckState.Checked)
         {
-            e.NewValue = CheckState.Unchecked;
+            // 잠금 ON 상태에서 기적재 행을 체크하려 하면 거부.
+            if (_lockArchivedBox.Checked && IsArchived(r)) { e.NewValue = CheckState.Unchecked; return; }
+            _checkedIds.Add(r.Id);
         }
+        else
+        {
+            _checkedIds.Remove(r.Id);
+        }
+        UpdateSelInfo();
     }
 
     private void OnToggleLock()
     {
         // 잠금을 켜는 순간 이미 체크돼 있던 기적재 행을 해제.
-        if (_lockArchivedBox.Checked)
-        {
-            _suppressItemCheck = true;
-            _list.BeginUpdate();
-            try
-            {
-                foreach (ListViewItem it in _list.Items)
-                    if (it.Checked && IsArchived((ExportRow)it.Tag!)) it.Checked = false;
-            }
-            finally { _list.EndUpdate(); _suppressItemCheck = false; }
-            UpdateSelInfo();
-        }
+        if (!_lockArchivedBox.Checked) return;
+        var archivedIds = _viewRows.Where(IsArchived).Select(r => r.Id);
+        _checkedIds.ExceptWith(archivedIds);
+        _list.Invalidate();
+        UpdateSelInfo();
     }
 
     private void BrowseManifest()
@@ -470,16 +475,14 @@ public sealed class DbExportTab : TabPage
 
     private void UpdateSelInfo()
     {
-        var n = _list.CheckedItems.Count;
-        _selInfoLabel.Text = $"{n:N0}건 선택됨 (전체 {_list.Items.Count:N0}건)";
+        var n = _checkedIds.Count;
+        _selInfoLabel.Text = $"{n:N0}건 선택됨 (전체 {_viewRows.Count:N0}건)";
         _exportBtn.Enabled = n > 0;
     }
 
     private void ExportSelected()
     {
-        var rows = _list.CheckedItems.Cast<ListViewItem>()
-            .Select(i => (ExportRow)i.Tag!)
-            .ToList();
+        var rows = _viewRows.Where(r => _checkedIds.Contains(r.Id)).ToList();
         if (rows.Count == 0)
         {
             MessageBox.Show(this, "추출할 행을 하나 이상 선택하세요.", "선택 없음");

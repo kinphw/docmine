@@ -29,7 +29,9 @@ namespace DocMine.UI.Tabs;
 
 public sealed class SearchTab : TabPage
 {
-    private sealed record FullRow(int Id, string Directory, string Filename, string PreviewFull);
+    private sealed record FullRow(
+        int Id, string Directory, string Filename,
+        string PreviewFull, string ParsedAtStr, bool IsExcluded);
 
     // readonly 아님 — ⑥ 설정에서 DB/테이블 변경 시 탭 활성화마다 현재 설정으로 갱신.
     private SearchService _search;
@@ -54,20 +56,17 @@ public sealed class SearchTab : TabPage
     private ColumnHeader _parsedAtCol = null!;    // 적재일 컬럼 — width 토글로 표시/숨김
     private readonly LogPane _log;
 
-    // 하단 버튼
-    private readonly Button _moreBtn, _allBtn, _delBtn, _openBtn, _openPathBtn;
+    // 하단 버튼 (페이징 제거 — VirtualMode 로 전체를 한 번에 표시)
+    private readonly Button _delBtn, _openBtn, _openPathBtn;
     private readonly Label _infoLabel;
     private const string InfoDefault = "더블클릭: 파일 열기  |  드래그/Ctrl+C: 탐색기로 복사  |  Del: 검색에서 제외";
 
-    // 페이징 / 상태
-    private int _offset;
+    // 가상화 데이터 — 검색 결과 전체를 메모리에 보유, ListView 는 보이는 행만 그림.
+    private readonly List<FullRow> _rows = new();
     private int _total;
+    // hover 스니펫 키워드 강조용으로만 마지막 검색어/방식 유지.
     private string _lastKw = "";
-    private SearchTarget _lastTarget = SearchTarget.Both;
     private SearchMode _lastMode = SearchMode.And;
-    private bool _lastIncludeExcluded;
-    private int? _lastIdMin, _lastIdMax;
-    private readonly HashSet<int> _excludedIds = new();
 
     // hover tooltip — Timer 기반 (마우스 정지 후 표시).
     private readonly System.Windows.Forms.Timer _hoverTimer;
@@ -180,7 +179,9 @@ public sealed class SearchTab : TabPage
             GridLines = false,
             Font = new Font("맑은 고딕", 9),
             AllowDrop = false,  // 드래그 source 만 — drop target 아님
+            VirtualMode = true, // 전체 결과를 _rows 에 두고 보이는 행만 on-demand 렌더
         };
+        _list.RetrieveVirtualItem += OnRetrieveItem;
         _list.Columns.Add("ID",              50);
         _list.Columns.Add("폴더",           300);
         _list.Columns.Add("파일명",         280);
@@ -243,18 +244,12 @@ public sealed class SearchTab : TabPage
         _openBtn      = new Button { Text = "파일 열기",  AutoSize = true, Enabled = false };
         _openPathBtn  = new Button { Text = "경로 열기",  AutoSize = true, Enabled = false };
         _delBtn       = new Button { Text = "제외 (Del)", AutoSize = true, Enabled = false };
-        _allBtn       = new Button { Text = "전체 조회",  AutoSize = true, Enabled = false };
-        _moreBtn      = new Button { Text = $"더보기 (+{SearchService.PageSize})", AutoSize = true, Enabled = false };
         _openBtn.Click     += (_, _) => OpenSelectedFile();
         _openPathBtn.Click += (_, _) => OpenSelectedPath();
         _delBtn.Click      += (_, _) => DeleteSelected();
-        _allBtn.Click      += async (_, _) => await LoadAllAsync();
-        _moreBtn.Click     += async (_, _) => await LoadMoreAsync();
         btnFlow.Controls.Add(_openBtn);
         btnFlow.Controls.Add(_openPathBtn);
         btnFlow.Controls.Add(_delBtn);
-        btnFlow.Controls.Add(_allBtn);
-        btnFlow.Controls.Add(_moreBtn);
         bot.Controls.Add(btnFlow, 1, 0);
 
         // Dock 처리는 Controls 콜렉션 *역순* — root(Fill) 먼저 add, bot(Bottom) 나중.
@@ -284,17 +279,17 @@ public sealed class SearchTab : TabPage
     // 케이스가 있어, 가장 신뢰성 있는 ProcessCmdKey 패턴 사용.
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
-        if (!_list.Focused && _list.SelectedItems.Count == 0)
+        if (!_list.Focused && _list.SelectedIndices.Count == 0)
             return base.ProcessCmdKey(ref msg, keyData);
 
         switch (keyData)
         {
             case Keys.Control | Keys.C:
             case Keys.Control | Keys.Insert:
-                if (_list.SelectedItems.Count > 0) { CopySelectedFiles(); return true; }
+                if (_list.SelectedIndices.Count > 0) { CopySelectedFiles(); return true; }
                 break;
             case Keys.Delete:
-                if (_list.SelectedItems.Count > 0) { DeleteSelected(); return true; }
+                if (_list.SelectedIndices.Count > 0) { DeleteSelected(); return true; }
                 break;
         }
         return base.ProcessCmdKey(ref msg, keyData);
@@ -336,30 +331,46 @@ public sealed class SearchTab : TabPage
             var mode = GetMode();
             var includeExcluded = _includeExcludedBox.Checked;
             var (idMin, idMax) = ParseIdFilters();
-            _lastKw = kw; _lastTarget = target; _lastMode = mode;
-            _lastIncludeExcluded = includeExcluded;
-            _lastIdMin = idMin; _lastIdMax = idMax;
-            _offset = 0;
+            _lastKw = kw; _lastMode = mode;
 
-            _list.Items.Clear();
-            _excludedIds.Clear();
+            // 선택/표시 초기화 — VirtualMode 라 Items.Clear 대신 VirtualListSize=0.
+            _list.SelectedIndices.Clear();
+            _rows.Clear();
+            _list.VirtualListSize = 0;
 
-            _total = await Task.Run(() => _search.CountResults(kw, target, mode, includeExcluded, idMin, idMax));
+            var total = await Task.Run(() => _search.CountResults(kw, target, mode, includeExcluded, idMin, idMax));
 
             var modeLabel = mode switch { SearchMode.Or => "OR", SearchMode.Phrase => "전체문자열", _ => "AND" };
-            var idLabel = (idMin, idMax) switch
-            {
-                (null, null) => "",
-                _ => $" [ID {idMin}~{idMax}]"
-            };
+            var idLabel = (idMin, idMax) switch { (null, null) => "", _ => $" [ID {idMin}~{idMax}]" };
             var exLabel = includeExcluded ? " [제외 포함]" : "";
-            _log.AppendLine($"[검색] '{kw}' | 대상: {target} | 방식: {modeLabel}{exLabel}{idLabel} | table={AppConfig.Current.DbTable} → {_total:N0}건");
+            _log.AppendLine($"[검색] '{kw}' | 대상: {target} | 방식: {modeLabel}{exLabel}{idLabel} | table={AppConfig.Current.DbTable} → {total:N0}건");
 
-            var rows = await Task.Run(() => _search.Search(kw, target, mode,
-                offset: 0, includeExcluded: includeExcluded, idMin: idMin, idMax: idMax));
-            _offset = rows.Count;
-            InsertRows(rows);
+            // 전체를 한 번에 로드(백그라운드) + 스니펫까지 미리 계산해 FullRow 로.
+            // body 원본(5000자)은 버리고 스니펫만 메모리에 — 대량도 메모리 가벼움.
+            var built = await Task.Run(() =>
+            {
+                var raw = _search.Search(kw, target, mode,
+                    limit: total, offset: 0, includeExcluded: includeExcluded, idMin: idMin, idMax: idMax);
+                var kws = SearchService.PrepareKeywords(kw, mode);
+                var list = new List<FullRow>(raw.Count);
+                foreach (var r in raw)
+                {
+                    var isExcluded = string.IsNullOrEmpty(r.BodyChunk);
+                    var preview = isExcluded ? "" : SearchService.ExtractSnippet(r.BodyChunk, kws);
+                    list.Add(new FullRow(
+                        r.Id, r.Directory, r.Filename, preview,
+                        r.ParsedAt?.ToString("yyyy-MM-dd HH:mm") ?? "", isExcluded));
+                }
+                return list;
+            });
+
+            _total = total;
+            _rows.Clear();
+            _rows.AddRange(built);
+            _list.VirtualListSize = _rows.Count;
+            _list.Invalidate();
             UpdateStatus();
+            OnSelectionChanged();
         }
         catch (Exception ex)
         {
@@ -373,94 +384,29 @@ public sealed class SearchTab : TabPage
         }
     }
 
-    private async Task LoadMoreAsync()
+    // VirtualMode — 보이는 행만 on-demand 로 ListViewItem 생성.
+    private void OnRetrieveItem(object? sender, RetrieveVirtualItemEventArgs e)
     {
-        _moreBtn.Enabled = false;
-        _statusLabel.Text = "추가 로딩...";
-        try
+        if (e.ItemIndex < 0 || e.ItemIndex >= _rows.Count)
         {
-            var rows = await Task.Run(() => _search.Search(
-                _lastKw, _lastTarget, _lastMode,
-                offset: _offset, includeExcluded: _lastIncludeExcluded,
-                idMin: _lastIdMin, idMax: _lastIdMax));
-            _offset += rows.Count;
-            InsertRows(rows);
-            UpdateStatus();
+            e.Item = new ListViewItem("");
+            return;
         }
-        catch (Exception ex) { MessageBox.Show(this, ex.Message, "오류"); }
-    }
-
-    private async Task LoadAllAsync()
-    {
-        _allBtn.Enabled = false;
-        _moreBtn.Enabled = false;
-        var remaining = _total - _list.Items.Count;
-        _statusLabel.Text = $"전체 로딩 중 ({remaining:N0}건)...";
-        try
+        var r = _rows[e.ItemIndex];
+        var fnShort = r.Filename.Length > 53 ? r.Filename[..50] + "…" : r.Filename;
+        var previewShort = r.PreviewFull.Length > 150 ? r.PreviewFull[..150] + "…" : r.PreviewFull;
+        // subitem 순서 = 컬럼 순서 (ID, 폴더, 파일명, 적재일, 미리보기).
+        var item = new ListViewItem(new[] { r.Id.ToString(), r.Directory, fnShort, r.ParsedAtStr, previewShort })
         {
-            var rows = await Task.Run(() => _search.Search(
-                _lastKw, _lastTarget, _lastMode,
-                limit: remaining, offset: _offset, includeExcluded: _lastIncludeExcluded,
-                idMin: _lastIdMin, idMax: _lastIdMax));
-            _offset += rows.Count;
-            InsertRows(rows);
-            UpdateStatus();
-        }
-        catch (Exception ex) { MessageBox.Show(this, ex.Message, "오류"); }
-    }
-
-    private void InsertRows(IReadOnlyList<SearchRow> rows)
-    {
-        var kws = SearchService.PrepareKeywords(_lastKw, _lastMode);
-        _list.BeginUpdate();
-        try
-        {
-            foreach (var r in rows)
-            {
-                var isExcluded = string.IsNullOrEmpty(r.BodyChunk);
-                var previewFull = isExcluded ? "" : SearchService.ExtractSnippet(r.BodyChunk, kws);
-                var previewShort = previewFull.Length > 150 ? previewFull[..150] + "…" : previewFull;
-                var fnShort = r.Filename.Length > 53 ? r.Filename[..50] + "…" : r.Filename;
-                var parsedAtStr = r.ParsedAt?.ToString("yyyy-MM-dd HH:mm") ?? "";
-
-                // subitem 순서 = 컬럼 순서 (ID, 폴더, 파일명, 적재일, 미리보기).
-                var item = new ListViewItem(new[] { r.Id.ToString(), r.Directory, fnShort, parsedAtStr, previewShort })
-                {
-                    Tag = new FullRow(r.Id, r.Directory, r.Filename, previewFull),
-                    UseItemStyleForSubItems = true,
-                };
-                if (isExcluded)
-                {
-                    // ForeColor 변경하면 selection highlight 와 충돌 가능성. Italic 만으로 구분.
-                    item.Font = _italicFont;
-                    _excludedIds.Add(r.Id);
-                }
-                _list.Items.Add(item);
-            }
-        }
-        finally
-        {
-            _list.EndUpdate();
-        }
+            UseItemStyleForSubItems = true,
+        };
+        // 제외 행은 italic (ForeColor 는 selection highlight 와 충돌해 안 건드림).
+        if (r.IsExcluded) item.Font = _italicFont;
+        e.Item = item;
     }
 
     private void UpdateStatus()
-    {
-        var shown = _list.Items.Count;
-        var remaining = _total - shown;
-        if (remaining > 0)
-        {
-            _statusLabel.Text = $"{_total:N0}건 중 {shown:N0}건 표시 (잔여 {remaining:N0})";
-            _moreBtn.Enabled = true;
-            _allBtn.Enabled = true;
-        }
-        else
-        {
-            _statusLabel.Text = $"{_total:N0}건 (전체)";
-            _moreBtn.Enabled = false;
-            _allBtn.Enabled = false;
-        }
-    }
+        => _statusLabel.Text = $"{_total:N0}건";
 
     private void OnToggleIdFilter()
     {
@@ -472,9 +418,15 @@ public sealed class SearchTab : TabPage
     private void ToggleParsedAtColumn()
         => _parsedAtCol.Width = _showParsedAtBox.Checked ? 140 : 0;
 
+    // 선택된 행 — VirtualMode 라 SelectedIndices → _rows 로 접근.
+    private List<FullRow> SelectedRows()
+        => _list.SelectedIndices.Cast<int>()
+            .Where(i => i >= 0 && i < _rows.Count)
+            .Select(i => _rows[i]).ToList();
+
     private void OnSelectionChanged()
     {
-        var sel = _list.SelectedItems;
+        var sel = SelectedRows();
         if (sel.Count == 0)
         {
             _openBtn.Enabled = false;
@@ -486,16 +438,14 @@ public sealed class SearchTab : TabPage
             return;
         }
 
-        var excludedSel = sel.Cast<ListViewItem>().Where(i => _excludedIds.Contains(((FullRow)i.Tag!).Id)).ToList();
-        var normalSel   = sel.Cast<ListViewItem>().Where(i => !_excludedIds.Contains(((FullRow)i.Tag!).Id)).ToList();
-        var mixed = excludedSel.Count > 0 && normalSel.Count > 0;
-
-        if (mixed)
+        var anyExcluded = sel.Any(r => r.IsExcluded);
+        var anyNormal   = sel.Any(r => !r.IsExcluded);
+        if (anyExcluded && anyNormal)
         {
             _delBtn.Enabled = false;
             _delBtn.Text = "혼합 선택 불가";
         }
-        else if (excludedSel.Count > 0)
+        else if (anyExcluded)
         {
             _delBtn.Enabled = true;
             _delBtn.Text = "완전 삭제 (Del)";
@@ -509,11 +459,9 @@ public sealed class SearchTab : TabPage
         _openBtn.Enabled     = sel.Count == 1;
         _openPathBtn.Enabled = sel.Count == 1;
 
-        // info_label — 단일 선택은 파일 경로, 다중은 건수.
         if (sel.Count == 1)
         {
-            var row = (FullRow)sel[0].Tag!;
-            var fp = Path.Combine(row.Directory, row.Filename);
+            var fp = Path.Combine(sel[0].Directory, sel[0].Filename);
             _infoLabel.Text = fp.Length <= 110 ? fp : fp[..107] + "…";
             _infoLabel.ForeColor = Color.Black;
         }
@@ -528,8 +476,9 @@ public sealed class SearchTab : TabPage
 
     private void OpenSelectedFile()
     {
-        if (_list.SelectedItems.Count != 1) return;
-        var row = (FullRow)_list.SelectedItems[0].Tag!;
+        var sel = SelectedRows();
+        if (sel.Count != 1) return;
+        var row = sel[0];
         var fp = Path.Combine(row.Directory, row.Filename);
         if (!File.Exists(fp))
         {
@@ -545,8 +494,9 @@ public sealed class SearchTab : TabPage
 
     private void OpenSelectedPath()
     {
-        if (_list.SelectedItems.Count != 1) return;
-        var row = (FullRow)_list.SelectedItems[0].Tag!;
+        var sel = SelectedRows();
+        if (sel.Count != 1) return;
+        var row = sel[0];
         var fp = Path.Combine(row.Directory, row.Filename);
         try
         {
@@ -569,12 +519,17 @@ public sealed class SearchTab : TabPage
 
     private void DeleteSelected()
     {
-        var sel = _list.SelectedItems.Cast<ListViewItem>().ToList();
-        if (sel.Count == 0) return;
-        var ids = sel.Select(i => ((FullRow)i.Tag!).Id).ToList();
-        var allExcluded = ids.All(id => _excludedIds.Contains(id));
-        var allNormal   = ids.All(id => !_excludedIds.Contains(id));
+        // 내림차순 인덱스 — 삭제 시 _rows.RemoveAt 가 앞 인덱스를 흔들지 않게.
+        var idxs = _list.SelectedIndices.Cast<int>()
+            .Where(i => i >= 0 && i < _rows.Count)
+            .OrderByDescending(i => i).ToList();
+        if (idxs.Count == 0) return;
+
+        var rows = idxs.Select(i => _rows[i]).ToList();
+        var allExcluded = rows.All(r => r.IsExcluded);
+        var allNormal   = rows.All(r => !r.IsExcluded);
         if (!allExcluded && !allNormal) return;
+        var ids = rows.Select(r => r.Id).ToList();
 
         try
         {
@@ -585,23 +540,19 @@ public sealed class SearchTab : TabPage
                     "완전 삭제", MessageBoxButtons.OKCancel) != DialogResult.OK) return;
                 var n = _repo.DeleteRows(ids);
                 _log.AppendLine($"[삭제] {n}건 완전 삭제");
-                foreach (var item in sel) _list.Items.Remove(item);
-                _excludedIds.ExceptWith(ids);
+                foreach (var i in idxs) _rows.RemoveAt(i);   // 내림차순이라 안전
                 _total -= n;
             }
             else
             {
                 var n = _repo.NullifyBodyText(ids);
                 _log.AppendLine($"[제외] {n}건 body_text NULL 처리");
-                foreach (var item in sel)
-                {
-                    var row = (FullRow)item.Tag!;
-                    _excludedIds.Add(row.Id);
-                    item.Font = _italicFont;
-                    item.SubItems[3].Text = "";
-                    item.Tag = row with { PreviewFull = "" };
-                }
+                foreach (var i in idxs)
+                    _rows[i] = _rows[i] with { IsExcluded = true, PreviewFull = "" };
             }
+            _list.SelectedIndices.Clear();
+            _list.VirtualListSize = _rows.Count;
+            _list.Invalidate();
             UpdateStatus();
             OnSelectionChanged();
         }
@@ -612,10 +563,9 @@ public sealed class SearchTab : TabPage
 
     private void CopySelectedFiles()
     {
-        var sel = _list.SelectedItems.Cast<ListViewItem>().ToList();
+        var sel = SelectedRows();
         if (sel.Count == 0) return;
         var paths = sel
-            .Select(i => (FullRow)i.Tag!)
             .Select(r => Path.Combine(r.Directory, r.Filename))
             .Where(File.Exists)
             .ToList();
@@ -634,10 +584,9 @@ public sealed class SearchTab : TabPage
 
     private void OnListItemDrag(object? sender, ItemDragEventArgs e)
     {
-        var sel = _list.SelectedItems.Cast<ListViewItem>().ToList();
+        var sel = SelectedRows();
         if (sel.Count == 0) return;
         var paths = sel
-            .Select(i => (FullRow)i.Tag!)
             .Select(r => Path.Combine(r.Directory, r.Filename))
             .Where(File.Exists)
             .ToArray();
@@ -661,7 +610,9 @@ public sealed class SearchTab : TabPage
         if (e.Button != MouseButtons.Right) return;
         var hit = _list.HitTest(e.Location);
         if (hit.Item is null) return;
-        if (!hit.Item.Selected) { _list.SelectedItems.Clear(); hit.Item.Selected = true; }
+        // VirtualMode — 우클릭한 행이 선택 안 돼 있으면 단독 선택으로 전환.
+        var idx = hit.Item.Index;
+        if (!_list.SelectedIndices.Contains(idx)) { _list.SelectedIndices.Clear(); _list.SelectedIndices.Add(idx); }
 
         var subIdx = hit.Item.SubItems.IndexOf(hit.SubItem ?? hit.Item.SubItems[0]);
         var menu = new ContextMenuStrip();
@@ -673,7 +624,7 @@ public sealed class SearchTab : TabPage
             case ColPreview: menu.Items.Add("내용 미리보기 복사", null, (_, _) => CopyField(ColPreview)); menu.Items.Add(new ToolStripSeparator()); break;
         }
 
-        var singleSel = _list.SelectedItems.Count == 1;
+        var singleSel = _list.SelectedIndices.Count == 1;
         menu.Items.Add("파일 열기", null, (_, _) => OpenSelectedFile()).Enabled = singleSel;
         menu.Items.Add("경로 열기", null, (_, _) => OpenSelectedPath()).Enabled = singleSel;
         menu.Items.Add(new ToolStripSeparator());
@@ -688,12 +639,11 @@ public sealed class SearchTab : TabPage
 
     private void CopyField(int fieldIdx)
     {
-        var sel = _list.SelectedItems.Cast<ListViewItem>().ToList();
+        var sel = SelectedRows();
         if (sel.Count == 0) return;
         var vals = new List<string>();
-        foreach (var it in sel)
+        foreach (var r in sel)
         {
-            var r = (FullRow)it.Tag!;
             vals.Add(fieldIdx switch
             {
                 ColDir     => r.Directory,
@@ -732,9 +682,11 @@ public sealed class SearchTab : TabPage
 
         var hit = _list.HitTest(clientPos);
         if (hit.Item is null) return;
+        var rowIdx = hit.Item.Index;
+        if (rowIdx < 0 || rowIdx >= _rows.Count) return;
         var subIdx = hit.Item.SubItems.IndexOf(hit.SubItem ?? hit.Item.SubItems[0]);
 
-        var row = (FullRow)hit.Item.Tag!;
+        var row = _rows[rowIdx];
         var text = subIdx switch
         {
             ColDir     => row.Directory,
