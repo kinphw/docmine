@@ -112,6 +112,10 @@ public sealed class SearchTab : TabPage
         _searchBtn = new Button { Text = "검색", AutoSize = true, Margin = new Padding(8, 2, 0, 0) };
         _searchBtn.Click += async (_, _) => await DoSearchAsync();
         row1.Controls.Add(_searchBtn);
+        // 키워드 초기화 — 입력칸만 비우고 포커스 (결과는 유지).
+        var clearKwBtn = new Button { Text = "초기화", AutoSize = true, Margin = new Padding(4, 2, 0, 0) };
+        clearKwBtn.Click += (_, _) => { _keywordBox.Clear(); _keywordBox.Focus(); };
+        row1.Controls.Add(clearKwBtn);
         _statusLabel = new Label { Text = "", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(12, 6, 0, 0) };
         row1.Controls.Add(_statusLabel);
         top.Controls.Add(row1, 0, 0);
@@ -279,7 +283,10 @@ public sealed class SearchTab : TabPage
     // 케이스가 있어, 가장 신뢰성 있는 ProcessCmdKey 패턴 사용.
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
-        if (!_list.Focused && _list.SelectedIndices.Count == 0)
+        // 결과 ListView 에 포커스가 있을 때만 Del/Ctrl+C 를 가로챈다.
+        // (키워드/ID 입력칸에 포커스가 있으면 Del·Backspace 는 텍스트 편집이어야 —
+        //  이전엔 선택된 행이 있으면 입력칸에서 Del 이 레코드를 삭제하던 버그.)
+        if (!_list.Focused)
             return base.ProcessCmdKey(ref msg, keyData);
 
         switch (keyData)

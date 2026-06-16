@@ -21,12 +21,9 @@ public sealed class DbExportTab : TabPage
     private SearchService _search;
     private DocumentRepository _repo;
 
-    // ListView 컬럼 — '환경2 적재'를 ID 다음에 삽입.
-    private const int ColId = 0, ColArchived = 1, ColDir = 2, ColFile = 3,
-                      ColExt = 4, ColSize = 5, ColParsedAt = 6, ColStatus = 7;
-
     // 환경2 적재 현황(manifest) — NormKey 집합. null = 미로드.
     private HashSet<(string, string)>? _manifest;
+    private readonly ToolTip _tip = new() { AutoPopDelay = 12000, InitialDelay = 400, ReshowDelay = 100 };
 
     // 가상화 — 표시 대상(필터 적용) + 체크 상태(ExportRow.Id 집합).
     private readonly List<ExportRow> _viewRows = new();
@@ -137,6 +134,9 @@ public sealed class DbExportTab : TabPage
         var manifestLoad = new Button { Text = "불러오기", AutoSize = true, Margin = new Padding(4, 2, 0, 0) };
         manifestLoad.Click += (_, _) => LoadManifest();
         row4.Controls.Add(manifestLoad);
+        var manifestUnload = new Button { Text = "해제", AutoSize = true, Margin = new Padding(4, 2, 0, 0) };
+        manifestUnload.Click += (_, _) => UnloadManifest();
+        row4.Controls.Add(manifestUnload);
         _manifestStatus = new Label { Text = "(미로드)", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(8, 6, 0, 0) };
         row4.Controls.Add(_manifestStatus);
         _excludeArchivedBox = new CheckBox { Text = "기적재 제외 (신규만)", AutoSize = true, Margin = new Padding(12, 4, 0, 0) };
@@ -147,20 +147,31 @@ public sealed class DbExportTab : TabPage
         row4.Controls.Add(_lockArchivedBox);
         top.Controls.Add(row4, 0, 3);
 
+        // hover 설명 — 기적재 토글/manifest 의 의미 안내.
+        _tip.SetToolTip(_manifestBox,
+            "환경2(법률검토)에서 '적재현황 내보내기'로 만든 CSV.\n불러오면 '환경2' 컬럼에 기적재 여부(✓)가 표시됩니다.");
+        _tip.SetToolTip(_excludeArchivedBox,
+            "환경2에 이미 적재된(✓) 행을 결과 목록에서 숨겨 신규만 표시합니다.\n(manifest 를 불러와야 동작)");
+        _tip.SetToolTip(_lockArchivedBox,
+            "환경2에 이미 적재된(✓) 행을 선택/추출하지 못하게 잠급니다.\n켜면 '전체 선택'도 신규만 선택합니다. (manifest 를 불러와야 동작)");
+
         root.Controls.Add(top, 0, 0);
 
         // ── 결과 ListView (체크박스) ──────────────────────────────────
+        // WinForms ListView 는 VirtualMode 에서 CheckBoxes 를 지원하지 않는다.
+        // → '선택' 컬럼에 ☑/☐ 를 직접 그리고 행 클릭으로 토글하는 의사 체크박스.
         _list = new ListView
         {
             Dock = DockStyle.Fill,
             View = View.Details,
-            CheckBoxes = true,
             FullRowSelect = true,
             HideSelection = false,
+            MultiSelect = false,
             GridLines = false,
             Font = new Font("맑은 고딕", 9),
             VirtualMode = true,  // 전체 결과를 _viewRows 에 두고 보이는 행만 렌더
         };
+        _list.Columns.Add("선택",     44, HorizontalAlignment.Center);
         _list.Columns.Add("ID",       50);
         // 환경2 적재 — manifest 로드 전엔 width 0(숨김), 로드 시 확장.
         _archivedCol = _list.Columns.Add("환경2", 0, HorizontalAlignment.Center);
@@ -170,10 +181,10 @@ public sealed class DbExportTab : TabPage
         _list.Columns.Add("크기",     90, HorizontalAlignment.Right);
         _list.Columns.Add("적재일",  135);
         _list.Columns.Add("상태",     70);
-        // VirtualMode: 체크 상태는 ListView 가 저장 안 하므로 _checkedIds 로 관리하고
-        // RetrieveVirtualItem 에서 복원. ItemCheck(변경 전)에서 잠금 거부 + 집합 갱신.
+        // 체크 상태는 _checkedIds 로 관리, RetrieveVirtualItem 에서 ☑/☐ 복원.
+        // 행 클릭 = 토글(잠금 시 기적재 거부).
         _list.RetrieveVirtualItem += OnRetrieveItem;
-        _list.ItemCheck += OnItemCheck;
+        _list.MouseClick += OnListMouseClick;
         root.Controls.Add(_list, 0, 1);
 
         // ── 로그 ──────────────────────────────────────────────────────
@@ -347,15 +358,27 @@ public sealed class DbExportTab : TabPage
             ? $"{r.FileSize / 1024.0 / 1024.0:F1} MB"
             : $"{r.FileSize / 1024.0:F0} KB";
         var parsedStr = r.ParsedAt?.ToString("yyyy-MM-dd HH:mm:ss") ?? "";
-        // subitem 순서 = 컬럼 순서 (ID, 환경2, 폴더, 파일명, 확장자, 크기, 적재일, 상태).
+        // subitem 순서 = 컬럼 순서 (선택, ID, 환경2, 폴더, 파일명, 확장자, 크기, 적재일, 상태).
         e.Item = new ListViewItem(new[]
         {
+            _checkedIds.Contains(r.Id) ? "☑" : "☐",
             r.Id.ToString(), IsArchived(r) ? "✓" : "", r.Directory, r.Filename, r.Extension,
             sizeStr, parsedStr, r.ParseStatus,
-        })
-        {
-            Checked = _checkedIds.Contains(r.Id),
-        };
+        });
+    }
+
+    // 행 클릭 = 선택 토글 (의사 체크박스). 잠금 ON + 기적재면 거부.
+    private void OnListMouseClick(object? sender, MouseEventArgs e)
+    {
+        var hit = _list.HitTest(e.Location);
+        if (hit.Item is null) return;
+        var idx = hit.Item.Index;
+        if (idx < 0 || idx >= _viewRows.Count) return;
+        var r = _viewRows[idx];
+        if (_lockArchivedBox.Checked && IsArchived(r)) return;
+        if (!_checkedIds.Add(r.Id)) _checkedIds.Remove(r.Id);   // 있으면 해제, 없으면 추가
+        _list.Invalidate(hit.Item.Bounds);
+        UpdateSelInfo();
     }
 
     private void SetAllChecked(bool value)
@@ -374,23 +397,6 @@ public sealed class DbExportTab : TabPage
     // ─ 기적재(환경2) 대조 ─────────────────────────────────────────────
     private bool IsArchived(ExportRow r)
         => _manifest is not null && _manifest.Contains(CsvIngestHelpers.NormKey(r.Directory, r.Filename));
-
-    private void OnItemCheck(object? sender, ItemCheckEventArgs e)
-    {
-        if (e.Index < 0 || e.Index >= _viewRows.Count) return;
-        var r = _viewRows[e.Index];
-        if (e.NewValue == CheckState.Checked)
-        {
-            // 잠금 ON 상태에서 기적재 행을 체크하려 하면 거부.
-            if (_lockArchivedBox.Checked && IsArchived(r)) { e.NewValue = CheckState.Unchecked; return; }
-            _checkedIds.Add(r.Id);
-        }
-        else
-        {
-            _checkedIds.Remove(r.Id);
-        }
-        UpdateSelInfo();
-    }
 
     private void OnToggleLock()
     {
@@ -439,6 +445,17 @@ public sealed class DbExportTab : TabPage
             _manifestStatus.ForeColor = Color.Firebrick;
             MessageBox.Show(this, ex.Message, "기적재 현황 로드 실패");
         }
+    }
+
+    private void UnloadManifest()
+    {
+        if (_manifest is null) return;
+        _manifest = null;
+        _manifestStatus.Text = "(미로드)";
+        _manifestStatus.ForeColor = Color.Gray;
+        _archivedCol.Width = 0;            // '환경2' 컬럼 숨김
+        ReapplyView();                     // ✓ 표시 제거 + (제외 토글이 켜져 있었으면) 필터 해제
+        _log.AppendLine("[기적재 현황] 해제됨");
     }
 
     private async Task ExportManifestAsync()
