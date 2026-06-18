@@ -332,7 +332,7 @@ public sealed class DbExportTab : TabPage
                 ? $" [적재일 {_dateFrom.Value:yyyy-MM-dd}~{_dateTo.Value:yyyy-MM-dd}]"
                 : "";
             _log.AppendLine($"[검색] '{kw}'{dateLabel} | table={AppConfig.Current.DbTable} → {rows.Count:N0}건");
-            _statusLabel.Text = $"{rows.Count:N0}건";
+            // 상태 라벨은 FillList → UpdateMatchStats 가 설정 (manifest 대조 합계 포함).
             if (rows.Count >= 200_000)
                 _log.AppendLine("  ⚠ 안전 상한(200,000건) 도달 — 조건을 좁혀 다시 검색하세요.");
         }
@@ -374,6 +374,22 @@ public sealed class DbExportTab : TabPage
         _selectAllBtn.Enabled = any;
         _selectNoneBtn.Enabled = any;
         UpdateSelInfo();
+        UpdateMatchStats();
+    }
+
+    // 검색 결과 합계 + (manifest 로드 시) 환경2 기적재/신규 대조 건수.
+    private void UpdateMatchStats()
+    {
+        var total = _lastResults.Count;
+        if (_manifest is null)
+        {
+            _statusLabel.Text = total == 0 ? "" : $"{total:N0}건";
+            return;
+        }
+        // 전체 검색 결과 기준 대조 (파일명만 일치 토글 반영). '기적재 제외' 로 화면에서
+        // 숨겨졌어도 합계는 전체 기준으로 보여준다.
+        var archived = _lastResults.Count(IsArchived);
+        _statusLabel.Text = $"{total:N0}건  ·  환경2 기적재 {archived:N0}  ·  신규 {total - archived:N0}";
     }
 
     // 토글/manifest 로드 시 마지막 검색 결과를 현재 뷰 설정으로 재구성 (재검색 없음).
