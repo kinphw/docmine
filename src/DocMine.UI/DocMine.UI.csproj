@@ -45,4 +45,14 @@
     <ProjectReference Include="..\DocMine.Win32\DocMine.Win32.csproj" />
   </ItemGroup>
 
+  <!-- 개발 편의: publish(=fdd 빌드) 후 docmine.exe 를 솔루션 루트에 복사.
+       깊은 publish 경로로 찾아 들어갈 필요 없이 루트에서 바로 실행.
+       배포용 버전 zip(python.exe rename) 은 make_release_cs.ps1 이 별도 담당. -->
+  <Target Name="CopyExeToRoot" AfterTargets="Publish">
+    <Copy SourceFiles="$(PublishDir)docmine.exe"
+          DestinationFolder="$(MSBuildProjectDirectory)\..\.."
+          SkipUnchangedFiles="false" />
+    <Message Importance="high" Text="  → 루트에 docmine.exe 복사 완료 (실행용)" />
+  </Target>
+
 </Project>
