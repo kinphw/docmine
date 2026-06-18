@@ -2,14 +2,18 @@
 //
 // 구성:
 //   상단 바: About(?) 버튼 — 우상단
-//   본체:    7탭 TabControl (Fill)
+//   좌측:    그룹 사이드 네비 (파이프라인 / 조회 / 도구 / 설정)
+//   우측:    선택된 기능 콘텐츠 (탭 인스턴스 재사용 — 상태 유지)
+//
+// 가로 평면 탭이 늘어 어색해진 IA 를 그룹 네비로 재편. 각 기능은 TabPage
+// 인스턴스 그대로(콘텐츠 호스트에 Dock=Fill, Visible 토글로 전환).
 //
 // 종료 처리 (FormClosing):
 //   - 비동기 작업(스캔/적재/추출) 진행 중이면 확인 다이얼로그
 //   - "예" 면 IBusyTab.RequestStop() 호출 + 잠시 polling 후 닫음
 //   - 시간 초과 시 강제 닫음 (Job Object 가 워커 회수)
-//   Python unified_gui._on_close / _poll_close 등가.
 
+using System.Drawing;
 using DocMine.UI.Tabs;
 
 namespace DocMine.UI;
@@ -17,7 +21,14 @@ namespace DocMine.UI;
 public sealed class MainForm : Form
 {
     private SettingsTab? _settingsTab;
-    private TabControl? _tabs;
+    private readonly List<Control> _contents = new();   // IBusyTab 순회 대상
+    private Panel _host = null!;
+    private Button? _currentNav;
+
+    private static readonly Color NavBg       = Color.FromArgb(0x2b, 0x2b, 0x2b);
+    private static readonly Color NavHeaderFg = Color.FromArgb(0x9a, 0xa0, 0xa6);
+    private static readonly Color NavItemFg   = Color.FromArgb(0xe0, 0xe0, 0xe0);
+    private static readonly Color NavSelBg    = Color.FromArgb(0x0e, 0x63, 0x9c);
 
     public MainForm()
     {
@@ -35,23 +46,45 @@ public sealed class MainForm : Form
     {
         SuspendLayout();
 
-        // WinForms Dock layout 은 Controls 컬렉션의 reverse-index 순으로 영역 할당:
-        // → Fill 컨트롤을 *먼저* Add 해야 큰 영역 차지하고, Top/Bottom 등을 나중 Add 하면
-        //    Top 이 먼저 영역 잡고 Fill 이 남은 영역에 들어가는 표준 동작.
+        // 기능 탭 인스턴스 (재사용 — 전환해도 상태 유지).
+        var scan      = new ScanTab();
+        var insert    = new InsertTab();
+        var preflight = new PreflightTab();
+        var search    = new SearchTab();
+        var extractor = new ExtractorTab();
+        var dbExport  = new DbExportTab();
+        _settingsTab  = new SettingsTab();
 
-        // ── ① Fill: 탭 컨트롤 ─────────────────────────────────────────
-        _tabs = new TabControl { Dock = DockStyle.Fill };
-        _tabs.TabPages.Add(new ScanTab());
-        _tabs.TabPages.Add(new InsertTab());
-        _tabs.TabPages.Add(new PreflightTab());
-        _tabs.TabPages.Add(new SearchTab());
-        _tabs.TabPages.Add(new ExtractorTab());
-        _tabs.TabPages.Add(new DbExportTab());
-        _settingsTab = new SettingsTab();
-        _tabs.TabPages.Add(_settingsTab);
-        Controls.Add(_tabs);
+        // ── ① Fill: 콘텐츠 호스트 ─────────────────────────────────────
+        // 선택된 탭만 _host 에 Add (나머지는 Remove — 인스턴스는 _contents 에
+        // 보관해 상태 유지). TabPage.Visible 토글은 TabControl 밖에서 불안정해
+        // Controls 교체 방식을 쓴다.
+        _host = new Panel { Dock = DockStyle.Fill };
+        foreach (var c in new Control[] { scan, insert, preflight, search, extractor, dbExport, _settingsTab })
+        {
+            c.Dock = DockStyle.Fill;
+            _contents.Add(c);
+        }
+        Controls.Add(_host);
 
-        // ── ② Top: ? About 버튼만 있는 얇은 바 ───────────────────────
+        // ── ② Left: 그룹 사이드 네비 ──────────────────────────────────
+        var nav = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Left,
+            Width = 178,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            BackColor = NavBg,
+            Padding = new Padding(0, 6, 0, 6),
+            AutoScroll = true,
+        };
+        AddNavGroup(nav, "파이프라인", ("스캔", scan), ("적재", insert), ("적재 전 검증", preflight), ("반출", dbExport));
+        AddNavGroup(nav, "조회", ("검색", search));
+        AddNavGroup(nav, "도구", ("문서 추출", extractor));
+        AddNavGroup(nav, "설정", ("DB 설정", _settingsTab));
+        Controls.Add(nav);
+
+        // ── ③ Top: ? About 버튼만 있는 얇은 바 ───────────────────────
         var topbar = new Panel { Dock = DockStyle.Top, Height = 32 };
         var aboutBtn = new Button
         {
@@ -64,11 +97,65 @@ public sealed class MainForm : Form
         aboutBtn.Click += (_, _) => AboutForm.Open(this);
         topbar.Controls.Add(aboutBtn);
         topbar.Resize += (_, _) => aboutBtn.Left = topbar.Width - aboutBtn.Width - 10;
-        // 초기 위치 (Resize 가 처음엔 안 불릴 수 있음)
         topbar.HandleCreated += (_, _) => aboutBtn.Left = topbar.Width - aboutBtn.Width - 10;
         Controls.Add(topbar);
 
         ResumeLayout(performLayout: true);
+
+        // 초기 화면 = 스캔.
+        ShowContent(scan, (Button)((FlowLayoutPanel)nav).Controls[1]);
+    }
+
+    // 그룹 헤더(비클릭) + 항목 버튼들을 네비에 추가.
+    private void AddNavGroup(FlowLayoutPanel nav, string header, params (string Label, Control Content)[] items)
+    {
+        nav.Controls.Add(new Label
+        {
+            Text = header,
+            AutoSize = false,
+            Width = 170,
+            Height = 24,
+            ForeColor = NavHeaderFg,
+            Font = new Font("맑은 고딕", 8.5f, FontStyle.Bold),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(10, 0, 0, 0),
+            Margin = new Padding(0, 6, 0, 2),
+        });
+        foreach (var (label, content) in items)
+        {
+            var btn = new Button
+            {
+                Text = "   " + label,
+                Width = 170,
+                Height = 30,
+                FlatStyle = FlatStyle.Flat,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = NavItemFg,
+                BackColor = NavBg,
+                Margin = new Padding(4, 0, 4, 0),
+            };
+            btn.FlatAppearance.BorderSize = 0;
+            btn.Click += (_, _) => ShowContent(content, btn);
+            nav.Controls.Add(btn);
+        }
+    }
+
+    private void ShowContent(Control content, Button navBtn)
+    {
+        if (!_host.Controls.Contains(content))
+        {
+            _host.Controls.Clear();          // 인스턴스는 _contents 가 보관 — Dispose 안 됨
+            _host.Controls.Add(content);
+        }
+
+        if (_currentNav is not null)
+        {
+            _currentNav.BackColor = NavBg;
+            _currentNav.ForeColor = NavItemFg;
+        }
+        navBtn.BackColor = NavSelBg;
+        navBtn.ForeColor = Color.White;
+        _currentNav = navBtn;
     }
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
@@ -100,9 +187,8 @@ public sealed class MainForm : Form
     private List<IBusyTab> CollectBusyTabs()
     {
         var result = new List<IBusyTab>();
-        if (_tabs is null) return result;
-        foreach (TabPage page in _tabs.TabPages)
-            if (page is IBusyTab b && b.IsBusy) result.Add(b);
+        foreach (var c in _contents)
+            if (c is IBusyTab b && b.IsBusy) result.Add(b);
         return result;
     }
 
