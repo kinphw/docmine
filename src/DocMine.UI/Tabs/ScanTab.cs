@@ -1,7 +1,8 @@
-// ScanTab — HWP / PDF 공용 스캔 탭. Python unified_gui.ScanTab 의 'scope' 분기 등가.
+// ScanTab — HWP + PDF 통합 스캔 탭.
 //
-// scope='hwp'  → .hwp/.hwpx, 출력 CSV = config.CsvFile
-// scope='pdf'  → .pdf,        출력 CSV = config.PdfCsvFile
+// 한 번의 드라이브 순회로 .hwp/.hwpx/.pdf 를 모두 스캔해 단일 CSV 에 기록.
+// (예전엔 HWP/PDF 스캔이 분리돼 드라이브를 2회 순회했음.) 적재 Runner 는
+// LoadCsv 후 각자 자기 확장자만 필터링하므로 단일 CSV 를 그대로 공유한다.
 
 using System.Drawing;
 using DocMine.Core.Config;
@@ -12,9 +13,6 @@ namespace DocMine.UI.Tabs;
 
 public sealed class ScanTab : TabPage, IBusyTab
 {
-    public enum Scope { Hwp, Pdf }
-
-    private readonly Scope _scope;
     private readonly LogPane _log;
     private readonly TextBox _outBox;
     private readonly List<(CheckBox Box, string Path)> _driveBoxes = new();
@@ -29,18 +27,10 @@ public sealed class ScanTab : TabPage, IBusyTab
     private readonly Panel _folderPanel;
     private readonly TextBox _folderBox;
 
-    public ScanTab(Scope scope) : base(scope == Scope.Hwp ? "① HWP 스캔" : "① PDF 스캔")
+    private static readonly string[] AllExts = { ".hwp", ".hwpx", ".pdf" };
+
+    public ScanTab() : base("① 스캔")
     {
-        _scope = scope;
-        var label = scope == Scope.Hwp ? "HWP" : "PDF";
-
-        var defaultExts = scope == Scope.Hwp
-            ? new[] { ".hwp", ".hwpx" }
-            : new[] { ".pdf" };
-        // 출력 CSV 기본값은 AppConfig 상수 (.csd) — settings.json 에 저장 안 함.
-        // 사용자가 "저장 위치…" 또는 텍스트 박스 직접 편집으로 매 실행마다 변경 가능.
-        var defaultCsv = scope == Scope.Hwp ? AppConfig.DefaultHwpCsv : AppConfig.DefaultPdfCsv;
-
         var root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -57,13 +47,13 @@ public sealed class ScanTab : TabPage, IBusyTab
         // ── 확장자 그룹 ──────────────────────────────────────────────
         var extGroup = new GroupBox
         {
-            Text = $"{label} 대상 확장자",
+            Text = "대상 확장자",
             Dock = DockStyle.Top,
             AutoSize = true,
             Padding = new Padding(8),
         };
         var extFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
-        foreach (var ext in defaultExts)
+        foreach (var ext in AllExts)
         {
             var cb = new CheckBox { Text = ext, Checked = true, AutoSize = true, Margin = new Padding(0, 0, 16, 0) };
             _extBoxes.Add((cb, ext));
@@ -172,7 +162,7 @@ public sealed class ScanTab : TabPage, IBusyTab
         // ── 출력 CSV ────────────────────────────────────────────────
         var outGroup = new GroupBox
         {
-            Text = $"{label} 출력 CSV",
+            Text = "출력 CSV (hwp+pdf 통합)",
             Dock = DockStyle.Top,
             AutoSize = true,
             Padding = new Padding(8),
@@ -183,7 +173,7 @@ public sealed class ScanTab : TabPage, IBusyTab
         _outBox = new TextBox
         {
             Dock = DockStyle.Fill,
-            Text = Path.GetFullPath(defaultCsv),
+            Text = Path.GetFullPath(AppConfig.DefaultScanCsv),
             Anchor = AnchorStyles.Left | AnchorStyles.Right,
         };
         var browseBtn = new Button { Text = "저장 위치…", AutoSize = true };
@@ -195,7 +185,7 @@ public sealed class ScanTab : TabPage, IBusyTab
 
         // ── 실행 버튼 ────────────────────────────────────────────────
         var btnFlow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(0, 6, 0, 6) };
-        _startBtn = new Button { Text = $"{label} 스캔 시작", AutoSize = true };
+        _startBtn = new Button { Text = "스캔 시작", AutoSize = true };
         _startBtn.Click += async (_, _) => await OnStartAsync();
         btnFlow.Controls.Add(_startBtn);
         root.Controls.Add(btnFlow, 0, 3);
@@ -237,7 +227,7 @@ public sealed class ScanTab : TabPage, IBusyTab
     {
         using var dlg = new SaveFileDialog
         {
-            Title    = $"{(_scope == Scope.Hwp ? "HWP" : "PDF")} 스캔 결과 CSV 저장 위치",
+            Title    = "스캔 결과 CSV 저장 위치",
             FileName = Path.GetFileName(_outBox.Text),
             DefaultExt = "csd",
             Filter   = "CSV (*.csd)|*.csd|모든 파일 (*.*)|*.*",
@@ -248,8 +238,6 @@ public sealed class ScanTab : TabPage, IBusyTab
 
     private async Task OnStartAsync()
     {
-        var label = _scope == Scope.Hwp ? "HWP" : "PDF";
-
         // 모드별 root 결정.
         List<string> roots;
         string scopeDesc;
@@ -289,10 +277,10 @@ public sealed class ScanTab : TabPage, IBusyTab
         }
 
         _startBtn.Enabled = false;
-        _startBtn.Text = $"{label} 스캔 중…";
+        _startBtn.Text = "스캔 중…";
         _log.Clear();
         _log.AppendLine("=" + new string('=', 60));
-        _log.AppendLine($"  Step 1 — {label} 파일 스캐너");
+        _log.AppendLine("  Step 1 — 파일 스캐너 (hwp+pdf 통합)");
         _log.AppendLine($"  대상       : {scopeDesc}");
         _log.AppendLine($"  대상 확장자: {string.Join(", ", exts.OrderBy(s => s))}");
         _log.AppendLine($"  출력 파일  : {Path.GetFullPath(outPath)}");
@@ -326,10 +314,8 @@ public sealed class ScanTab : TabPage, IBusyTab
             else
             {
                 DriveScanner.WriteCsv(result.Files, outPath);
-                // 적재 탭이 자동으로 이 경로를 제안할 수 있도록 publish.
-                var fullOut = Path.GetFullPath(outPath);
-                if (_scope == Scope.Hwp) ScanResultRegistry.SetHwp(fullOut);
-                else                     ScanResultRegistry.SetPdf(fullOut);
+                // 적재/검증 탭이 자동으로 이 경로를 제안할 수 있도록 publish.
+                ScanResultRegistry.Set(Path.GetFullPath(outPath));
 
                 _log.AppendLine("\n" + new string('=', 60));
                 _log.AppendLine($"  완료: 총 {result.Files.Count:N0}개 파일  ({sw.Elapsed.TotalSeconds:F1}초)");
@@ -353,7 +339,7 @@ public sealed class ScanTab : TabPage, IBusyTab
         finally
         {
             _startBtn.Enabled = true;
-            _startBtn.Text = $"{label} 스캔 시작";
+            _startBtn.Text = "스캔 시작";
             _cts?.Dispose();
             _cts = null;
         }

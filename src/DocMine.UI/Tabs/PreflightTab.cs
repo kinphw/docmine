@@ -112,7 +112,7 @@ public sealed class PreflightTab : TabPage
             _repo = new DocumentRepository(AppConfig.Current);
             if (string.IsNullOrEmpty(_csvBox.Text))
             {
-                var last = ScanResultRegistry.HwpLast ?? ScanResultRegistry.PdfLast;
+                var last = ScanResultRegistry.LastScanCsv;
                 if (last is not null) _csvBox.Text = last;
             }
         };

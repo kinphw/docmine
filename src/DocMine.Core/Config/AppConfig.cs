@@ -22,8 +22,9 @@ public sealed record AppConfig(
     //
     // 확장자 .csd: 운영 환경에서 .csv 가 Excel 자동 연결되거나 보안 솔루션의
     // 처리 대상이 되는 케이스를 피하기 위한 박건영님 운영 정책.
-    public const string DefaultHwpCsv = "hwp_file_list.csd";
-    public const string DefaultPdfCsv = "pdf_file_list.csd";
+    // 스캔/적재 공용 단일 CSV — hwp+pdf 를 한 번에 스캔해 한 파일에 기록.
+    // 적재 Runner 는 LoadCsv 후 각자 자기 확장자만 필터링하므로 단일 CSV 호환.
+    public const string DefaultScanCsv = "doc_file_list.csd";
 
     // 적재 튜닝 — Python 판 .env 기본값과 동일.
     public const int CommitEvery         = 50;    // DB 커밋 간격 (건)

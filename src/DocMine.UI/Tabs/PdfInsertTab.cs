@@ -46,7 +46,7 @@ public sealed class PdfInsertTab : TabPage, IBusyTab
         {
             Dock = DockStyle.Fill,
             // 기본값은 코드 상수 (.csd) — settings 와 무관. 사용자가 다른 파일 선택 가능.
-            Text = Path.GetFullPath(AppConfig.DefaultPdfCsv),
+            Text = Path.GetFullPath(AppConfig.DefaultScanCsv),
             Anchor = AnchorStyles.Left | AnchorStyles.Right,
         };
         var browseBtn = new Button { Text = "찾아보기…", AutoSize = true };
@@ -230,7 +230,7 @@ public sealed class PdfInsertTab : TabPage, IBusyTab
     private void RefreshUseLastScanLink()
     {
         if (!Visible) return;
-        var last = ScanResultRegistry.PdfLast;
+        var last = ScanResultRegistry.LastScanCsv;
         if (string.IsNullOrEmpty(last)) { _useLastScanLink.Visible = false; return; }
 
         string current;
@@ -247,7 +247,7 @@ public sealed class PdfInsertTab : TabPage, IBusyTab
 
     private void UseLastScan()
     {
-        var last = ScanResultRegistry.PdfLast;
+        var last = ScanResultRegistry.LastScanCsv;
         if (string.IsNullOrEmpty(last)) return;
         _csvBox.Text = last;
         _useLastScanLink.Visible = false;

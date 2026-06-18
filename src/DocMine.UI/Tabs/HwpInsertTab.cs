@@ -2,7 +2,7 @@
 //
 // PdfInsertTab 과 구조 동일. 차이점:
 //   - HwpInsertRunner 호출 (HwpWorker.exe spawn)
-//   - 기본 CSV = AppConfig.DefaultHwpCsv (.csd)
+//   - 기본 CSV = AppConfig.DefaultScanCsv (hwp+pdf 통합 — .hwp/.hwpx 만 필터링)
 //   - 라벨/메시지 "HWP" 로 변경
 //
 // 운영 가정: 배치 도중 사용자가 한/글로 작업하지 않음. 시작 직후 PC 의 모든
@@ -46,7 +46,7 @@ public sealed class HwpInsertTab : TabPage, IBusyTab
         _csvBox = new TextBox
         {
             Dock = DockStyle.Fill,
-            Text = Path.GetFullPath(AppConfig.DefaultHwpCsv),
+            Text = Path.GetFullPath(AppConfig.DefaultScanCsv),
             Anchor = AnchorStyles.Left | AnchorStyles.Right,
         };
         var browseBtn = new Button { Text = "찾아보기…", AutoSize = true };
@@ -221,7 +221,7 @@ public sealed class HwpInsertTab : TabPage, IBusyTab
     private void RefreshUseLastScanLink()
     {
         if (!Visible) return;
-        var last = ScanResultRegistry.HwpLast;
+        var last = ScanResultRegistry.LastScanCsv;
         if (string.IsNullOrEmpty(last)) { _useLastScanLink.Visible = false; return; }
 
         string current;
@@ -238,7 +238,7 @@ public sealed class HwpInsertTab : TabPage, IBusyTab
 
     private void UseLastScan()
     {
-        var last = ScanResultRegistry.HwpLast;
+        var last = ScanResultRegistry.LastScanCsv;
         if (string.IsNullOrEmpty(last)) return;
         _csvBox.Text = last;
         _useLastScanLink.Visible = false;
