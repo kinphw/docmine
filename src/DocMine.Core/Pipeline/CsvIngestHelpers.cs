@@ -85,13 +85,15 @@ public static class CsvIngestHelpers
     ///   - 대소문자 무시 (Windows 경로는 case-insensitive)
     /// </summary>
     public static (string, string) NormKey(string directory, string filename)
-    {
-        static string N(string s) => (s ?? string.Empty)
+        => (NormName(directory), NormName(filename));
+
+    /// <summary>단일 문자열(파일명 등) 정규화 — NormKey 와 동일 규칙
+    /// (NFC + trim + lowercase). 파일명만 비교(폴더 무관)할 때 사용.</summary>
+    public static string NormName(string s)
+        => (s ?? string.Empty)
             .Normalize(System.Text.NormalizationForm.FormC)
             .Trim()
             .ToLowerInvariant();
-        return (N(directory), N(filename));
-    }
 
     /// <summary>(directory, filename) chunked lookup — 이미 DB 에 있는 행은 skip.
     /// 반환 집합은 <see cref="NormKey"/> 로 정규화된 키. 호출부도 NormKey 로 비교할 것.</summary>

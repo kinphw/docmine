@@ -23,6 +23,8 @@ public sealed class DbExportTab : TabPage
 
     // 환경2 적재 현황(manifest) — NormKey 집합. null = 미로드.
     private HashSet<(string, string)>? _manifest;
+    // 파일명만 일치 모드용 — manifest 의 파일명(정규화) 집합. 폴더가 바뀌어도 매칭.
+    private HashSet<string>? _manifestNames;
     private readonly ToolTip _tip = new() { AutoPopDelay = 12000, InitialDelay = 400, ReshowDelay = 100 };
 
     // 가상화 — 표시 대상(필터 적용) + 체크 상태(ExportRow.Id 집합).
@@ -43,6 +45,7 @@ public sealed class DbExportTab : TabPage
     private readonly Label _manifestStatus;
     private readonly CheckBox _lockArchivedBox;
     private readonly CheckBox _excludeArchivedBox;   // 신규만 — 기적재 행을 결과에서 숨김
+    private readonly CheckBox _matchNameOnlyBox;     // 폴더 무시, 파일명만으로 기적재 판정
 
     // 마지막 검색 결과 원본 — 토글/manifest 로드 시 재검색 없이 재필터링.
     private IReadOnlyList<ExportRow> _lastResults = Array.Empty<ExportRow>();
@@ -145,6 +148,9 @@ public sealed class DbExportTab : TabPage
         _lockArchivedBox = new CheckBox { Text = "기적재 선택 잠금", AutoSize = true, Margin = new Padding(12, 4, 0, 0) };
         _lockArchivedBox.CheckedChanged += (_, _) => OnToggleLock();
         row4.Controls.Add(_lockArchivedBox);
+        _matchNameOnlyBox = new CheckBox { Text = "파일명만 일치", AutoSize = true, Margin = new Padding(12, 4, 0, 0) };
+        _matchNameOnlyBox.CheckedChanged += (_, _) => ReapplyView();
+        row4.Controls.Add(_matchNameOnlyBox);
         top.Controls.Add(row4, 0, 3);
 
         // hover 설명 — 기적재 토글/manifest 의 의미 안내.
@@ -154,6 +160,8 @@ public sealed class DbExportTab : TabPage
             "환경2에 이미 적재된(✓) 행을 결과 목록에서 숨겨 신규만 표시합니다.\n(manifest 를 불러와야 동작)");
         _tip.SetToolTip(_lockArchivedBox,
             "환경2에 이미 적재된(✓) 행을 선택/추출하지 못하게 잠급니다.\n켜면 '전체 선택'도 신규만 선택합니다. (manifest 를 불러와야 동작)");
+        _tip.SetToolTip(_matchNameOnlyBox,
+            "기적재 판정 시 폴더를 무시하고 파일명만 비교합니다.\n환경1에서 폴더가 바뀌었어도 같은 파일명이면 기적재로 간주.");
 
         root.Controls.Add(top, 0, 0);
 
@@ -395,8 +403,14 @@ public sealed class DbExportTab : TabPage
     }
 
     // ─ 기적재(환경2) 대조 ─────────────────────────────────────────────
+    // 기본: (폴더+파일명) 완전 일치. '파일명만 일치' ON: 폴더 무시하고 파일명만
+    // (환경1 에서 폴더가 바뀌어도 같은 파일명이면 기적재로 간주).
     private bool IsArchived(ExportRow r)
-        => _manifest is not null && _manifest.Contains(CsvIngestHelpers.NormKey(r.Directory, r.Filename));
+    {
+        if (_matchNameOnlyBox.Checked)
+            return _manifestNames is not null && _manifestNames.Contains(CsvIngestHelpers.NormName(r.Filename));
+        return _manifest is not null && _manifest.Contains(CsvIngestHelpers.NormKey(r.Directory, r.Filename));
+    }
 
     private void OnToggleLock()
     {
@@ -432,6 +446,8 @@ public sealed class DbExportTab : TabPage
         try
         {
             _manifest = CsvIngestHelpers.LoadManifestKeys(path);
+            // 파일명만 일치 모드용 — manifest 의 파일명(이미 정규화됨) 집합.
+            _manifestNames = _manifest.Select(t => t.Item2).ToHashSet();
             _manifestStatus.Text = $"기적재 {_manifest.Count:N0}건 로드됨";
             _manifestStatus.ForeColor = Color.SeaGreen;
             _archivedCol.Width = 60;
@@ -441,6 +457,7 @@ public sealed class DbExportTab : TabPage
         catch (Exception ex)
         {
             _manifest = null;
+            _manifestNames = null;
             _manifestStatus.Text = "로드 실패";
             _manifestStatus.ForeColor = Color.Firebrick;
             MessageBox.Show(this, ex.Message, "기적재 현황 로드 실패");
@@ -451,6 +468,7 @@ public sealed class DbExportTab : TabPage
     {
         if (_manifest is null) return;
         _manifest = null;
+        _manifestNames = null;
         _manifestStatus.Text = "(미로드)";
         _manifestStatus.ForeColor = Color.Gray;
         _archivedCol.Width = 0;            // '환경2' 컬럼 숨김
