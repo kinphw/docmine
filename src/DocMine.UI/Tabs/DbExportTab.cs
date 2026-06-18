@@ -57,7 +57,7 @@ public sealed class DbExportTab : TabPage
     private readonly Button _selectAllBtn, _selectNoneBtn, _exportBtn, _manifestExportBtn;
     private readonly Label _selInfoLabel;
 
-    public DbExportTab() : base("⑤ DB 추출")
+    public DbExportTab() : base("⑤ 반출")
     {
         var cfg = AppConfig.Current;
         _search = new SearchService(cfg);
@@ -71,11 +71,16 @@ public sealed class DbExportTab : TabPage
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // 결과
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 로그
 
-        // ── 검색 컨트롤 ────────────────────────────────────────────────
-        var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 4 };
+        // ── 상단: 1.검색 / 2.환경2 대조 두 단계 그룹 ─────────────────
+        var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 2 };
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        // row1: 키워드 + 검색.
+        // ── 1. 검색 조건 ──────────────────────────────────────────────
+        var searchGroup = new GroupBox { Text = "1. 검색 조건", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
+        var searchInner = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 3 };
+        searchInner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        // 키워드 + 검색.
         var row1 = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
         row1.Controls.Add(new Label { Text = "키워드:", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
         _keywordBox = new TextBox { Width = 320, Font = new Font("맑은 고딕", 11) };
@@ -86,9 +91,9 @@ public sealed class DbExportTab : TabPage
         row1.Controls.Add(_searchBtn);
         _statusLabel = new Label { Text = "", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(12, 6, 0, 0) };
         row1.Controls.Add(_statusLabel);
-        top.Controls.Add(row1, 0, 0);
+        searchInner.Controls.Add(row1, 0, 0);
 
-        // row2: 대상 + 방식 + 제외 포함.
+        // 대상 + 방식 + 제외 포함.
         var row2 = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Padding = new Padding(0, 4, 0, 0) };
         row2.Controls.Add(new Label { Text = "검색 대상:", AutoSize = true, Padding = new Padding(0, 4, 4, 0) });
         _targetBoth  = new RadioButton { Text = "제목+본문", Checked = true, AutoSize = true };
@@ -108,60 +113,82 @@ public sealed class DbExportTab : TabPage
         row2.Controls.Add(new Label { Text = "  |  ", AutoSize = true, ForeColor = Color.LightGray, Padding = new Padding(0, 4, 0, 0) });
         _includeExcludedBox = new CheckBox { Text = "제외 항목 포함", Checked = true, AutoSize = true };
         row2.Controls.Add(_includeExcludedBox);
-        top.Controls.Add(row2, 0, 1);
+        searchInner.Controls.Add(row2, 0, 1);
 
-        // row3: 적재일 범위.
+        // 적재일 범위.
         var row3 = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Padding = new Padding(0, 4, 0, 0) };
         _dateFilterBox = new CheckBox { Text = "적재일 범위", AutoSize = true, Padding = new Padding(0, 4, 4, 0) };
         _dateFilterBox.CheckedChanged += (_, _) => OnToggleDateFilter();
         row3.Controls.Add(_dateFilterBox);
         _dateFrom = new DateTimePicker { Format = DateTimePickerFormat.Short, Width = 110, Enabled = false };
         _dateTo   = new DateTimePicker { Format = DateTimePickerFormat.Short, Width = 110, Enabled = false };
-        // 기본값: from = 30일 전, to = 오늘.
         _dateFrom.Value = DateTime.Today.AddDays(-30);
         _dateTo.Value   = DateTime.Today;
         row3.Controls.Add(_dateFrom);
         row3.Controls.Add(new Label { Text = " ~ ", AutoSize = true, Padding = new Padding(4, 4, 4, 0) });
         row3.Controls.Add(_dateTo);
         row3.Controls.Add(new Label { Text = "(적재 시각 기준, 양끝 포함)", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(8, 4, 0, 0) });
-        top.Controls.Add(row3, 0, 2);
+        searchInner.Controls.Add(row3, 0, 2);
+        searchGroup.Controls.Add(searchInner);
+        top.Controls.Add(searchGroup, 0, 0);
 
-        // row4: 기적재 현황(환경2 manifest) 대조.
-        var row4 = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Padding = new Padding(0, 4, 0, 0) };
-        row4.Controls.Add(new Label { Text = "기적재 현황 CSV:", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
-        _manifestBox = new TextBox { Width = 300 };
-        row4.Controls.Add(_manifestBox);
+        // ── 2. 환경2 대조 (선택) ──────────────────────────────────────
+        var matchGroup = new GroupBox { Text = "2. 환경2 대조 (선택)", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
+        var matchInner = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 3 };
+        matchInner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        // 불러오기 줄 — 환경2 적재현황(manifest) 가져와 대조.
+        var loadRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
+        loadRow.Controls.Add(new Label { Text = "환경2 적재현황 CSV:", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
+        _manifestBox = new TextBox { Width = 280 };
+        loadRow.Controls.Add(_manifestBox);
         var manifestBrowse = new Button { Text = "찾아보기…", AutoSize = true, Margin = new Padding(4, 2, 0, 0) };
         manifestBrowse.Click += (_, _) => BrowseManifest();
-        row4.Controls.Add(manifestBrowse);
+        loadRow.Controls.Add(manifestBrowse);
         var manifestLoad = new Button { Text = "불러오기", AutoSize = true, Margin = new Padding(4, 2, 0, 0) };
         manifestLoad.Click += (_, _) => LoadManifest();
-        row4.Controls.Add(manifestLoad);
+        loadRow.Controls.Add(manifestLoad);
         var manifestUnload = new Button { Text = "해제", AutoSize = true, Margin = new Padding(4, 2, 0, 0) };
         manifestUnload.Click += (_, _) => UnloadManifest();
-        row4.Controls.Add(manifestUnload);
+        loadRow.Controls.Add(manifestUnload);
         _manifestStatus = new Label { Text = "(미로드)", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(8, 6, 0, 0) };
-        row4.Controls.Add(_manifestStatus);
-        _excludeArchivedBox = new CheckBox { Text = "기적재 제외 (신규만)", AutoSize = true, Margin = new Padding(12, 4, 0, 0) };
+        loadRow.Controls.Add(_manifestStatus);
+        matchInner.Controls.Add(loadRow, 0, 0);
+
+        // 대조 토글 줄.
+        var toggleRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Padding = new Padding(0, 2, 0, 0) };
+        _excludeArchivedBox = new CheckBox { Text = "기적재 제외 (신규만)", AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
         _excludeArchivedBox.CheckedChanged += (_, _) => ReapplyView();
-        row4.Controls.Add(_excludeArchivedBox);
+        toggleRow.Controls.Add(_excludeArchivedBox);
         _lockArchivedBox = new CheckBox { Text = "기적재 선택 잠금", AutoSize = true, Margin = new Padding(12, 4, 0, 0) };
         _lockArchivedBox.CheckedChanged += (_, _) => OnToggleLock();
-        row4.Controls.Add(_lockArchivedBox);
+        toggleRow.Controls.Add(_lockArchivedBox);
         _matchNameOnlyBox = new CheckBox { Text = "파일명만 일치", AutoSize = true, Margin = new Padding(12, 4, 0, 0) };
         _matchNameOnlyBox.CheckedChanged += (_, _) => ReapplyView();
-        row4.Controls.Add(_matchNameOnlyBox);
-        top.Controls.Add(row4, 0, 3);
+        toggleRow.Controls.Add(_matchNameOnlyBox);
+        matchInner.Controls.Add(toggleRow, 0, 1);
+
+        // 생성 줄 — 이 환경(현재 DB) 의 적재현황을 manifest 로 내보내기 (대조와 반대 방향).
+        var genRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Padding = new Padding(0, 4, 0, 0) };
+        genRow.Controls.Add(new Label { Text = "현재 DB → manifest:", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(0, 6, 4, 0) });
+        _manifestExportBtn = new Button { Text = "manifest 내보내기", AutoSize = true, Margin = new Padding(0, 2, 0, 0) };
+        _manifestExportBtn.Click += async (_, _) => await ExportManifestAsync();
+        genRow.Controls.Add(_manifestExportBtn);
+        matchInner.Controls.Add(genRow, 0, 2);
+        matchGroup.Controls.Add(matchInner);
+        top.Controls.Add(matchGroup, 0, 1);
 
         // hover 설명 — 기적재 토글/manifest 의 의미 안내.
         _tip.SetToolTip(_manifestBox,
-            "환경2(법률검토)에서 '적재현황 내보내기'로 만든 CSV.\n불러오면 '환경2' 컬럼에 기적재 여부(✓)가 표시됩니다.");
+            "환경2(법률검토)에서 'manifest 내보내기'로 만든 CSV.\n불러오면 '환경2' 컬럼에 기적재 여부(✓)가 표시됩니다.");
         _tip.SetToolTip(_excludeArchivedBox,
             "환경2에 이미 적재된(✓) 행을 결과 목록에서 숨겨 신규만 표시합니다.\n(manifest 를 불러와야 동작)");
         _tip.SetToolTip(_lockArchivedBox,
-            "환경2에 이미 적재된(✓) 행을 선택/추출하지 못하게 잠급니다.\n켜면 '전체 선택'도 신규만 선택합니다. (manifest 를 불러와야 동작)");
+            "환경2에 이미 적재된(✓) 행을 선택/반출하지 못하게 잠급니다.\n켜면 '전체 선택'도 신규만 선택합니다. (manifest 를 불러와야 동작)");
         _tip.SetToolTip(_matchNameOnlyBox,
             "기적재 판정 시 폴더를 무시하고 파일명만 비교합니다.\n환경1에서 폴더가 바뀌었어도 같은 파일명이면 기적재로 간주.");
+        _tip.SetToolTip(_manifestExportBtn,
+            "현재 연결된 DB 의 전체 적재현황(폴더+파일명)을 manifest CSV 로 내보냅니다.\n환경2 에서 만들어 환경1 로 옮겨 대조에 사용.");
 
         root.Controls.Add(top, 0, 0);
 
@@ -222,20 +249,17 @@ public sealed class DbExportTab : TabPage
             AutoSize = true, FlowDirection = FlowDirection.RightToLeft,
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
         };
-        _exportBtn     = new Button { Text = "선택 행 CSV 추출", AutoSize = true, Enabled = false };
+        // 반출 주 흐름 버튼만 — manifest 생성은 '2. 환경2 대조' 그룹으로 분리됨.
+        _exportBtn     = new Button { Text = "선택 항목 반출 (CSV)", AutoSize = true, Enabled = false };
         _selectNoneBtn = new Button { Text = "전체 해제", AutoSize = true, Enabled = false };
         _selectAllBtn  = new Button { Text = "전체 선택", AutoSize = true, Enabled = false };
-        // 이 DB(환경2 등) 전체의 폴더/파일명만 manifest CSV 로 덤프 — 검색과 무관.
-        _manifestExportBtn = new Button { Text = "적재현황 내보내기", AutoSize = true, Margin = new Padding(0, 0, 16, 0) };
         _exportBtn.Click     += (_, _) => ExportSelected();
         _selectNoneBtn.Click += (_, _) => SetAllChecked(false);
         _selectAllBtn.Click  += (_, _) => SetAllChecked(true);
-        _manifestExportBtn.Click += async (_, _) => await ExportManifestAsync();
         // RightToLeft FlowDirection — Add 순서 역순으로 화면에 배치.
         btnFlow.Controls.Add(_exportBtn);
         btnFlow.Controls.Add(_selectNoneBtn);
         btnFlow.Controls.Add(_selectAllBtn);
-        btnFlow.Controls.Add(_manifestExportBtn);
         bot.Controls.Add(btnFlow, 1, 0);
 
         Controls.Add(root);
