@@ -46,6 +46,7 @@ public sealed class InsertTab : TabPage, IBusyTab
     private readonly List<Row> _all = new();
     private readonly List<Row> _viewRows = new();
     private readonly HashSet<(string, string)> _checkedKeys = new();   // NormKey 로 선택 추적
+    private int _anchorIndex = -1;   // Shift+클릭 범위 선택의 기준점
 
     public InsertTab() : base("② 적재")
     {
@@ -229,6 +230,7 @@ public sealed class InsertTab : TabPage, IBusyTab
         _viewRows.Clear();
         foreach (var r in _all)
             if (!_unloadedOnlyBox.Checked || !r.Loaded) _viewRows.Add(r);
+        _anchorIndex = -1;   // 뷰 재구성 — 인덱스 기준점 무효화
         _list.VirtualListSize = _viewRows.Count;
         _list.Invalidate();
 
@@ -270,10 +272,27 @@ public sealed class InsertTab : TabPage, IBusyTab
         if (hit.Item is null) return;
         var idx = hit.Item.Index;
         if (idx < 0 || idx >= _viewRows.Count) return;
-        var c = _viewRows[idx].Csv;
-        var key = CsvIngestHelpers.NormKey(c.Directory, c.Filename);
-        if (!_checkedKeys.Add(key)) _checkedKeys.Remove(key);   // 토글
-        _list.Invalidate(hit.Item.Bounds);
+
+        if ((Control.ModifierKeys & Keys.Shift) == Keys.Shift && _anchorIndex >= 0 && _anchorIndex < _viewRows.Count)
+        {
+            // Shift+클릭 — anchor ~ 현재 사이를 모두 체크.
+            var lo = Math.Min(_anchorIndex, idx);
+            var hi = Math.Max(_anchorIndex, idx);
+            for (var i = lo; i <= hi; i++)
+            {
+                var cc = _viewRows[i].Csv;
+                _checkedKeys.Add(CsvIngestHelpers.NormKey(cc.Directory, cc.Filename));
+            }
+            _list.Invalidate();
+        }
+        else
+        {
+            var c = _viewRows[idx].Csv;
+            var key = CsvIngestHelpers.NormKey(c.Directory, c.Filename);
+            if (!_checkedKeys.Add(key)) _checkedKeys.Remove(key);   // 토글
+            _anchorIndex = idx;
+            _list.Invalidate(hit.Item.Bounds);
+        }
         UpdateSelInfo();
     }
 

@@ -30,6 +30,7 @@ public sealed class DbExportTab : TabPage
     // 가상화 — 표시 대상(필터 적용) + 체크 상태(ExportRow.Id 집합).
     private readonly List<ExportRow> _viewRows = new();
     private readonly HashSet<int> _checkedIds = new();
+    private int _anchorIndex = -1;   // Shift+클릭 범위 선택의 기준점
 
     private readonly TextBox _keywordBox;
     private readonly RadioButton _targetBoth, _targetTitle, _targetBody;
@@ -356,6 +357,7 @@ public sealed class DbExportTab : TabPage
 
         _viewRows.Clear();
         _checkedIds.Clear();
+        _anchorIndex = -1;   // 뷰 재구성 — 인덱스 기준점 무효화
         foreach (var r in rows)
         {
             if (excludeArchived && IsArchived(r)) { hidden++; continue; }
@@ -400,16 +402,34 @@ public sealed class DbExportTab : TabPage
     }
 
     // 행 클릭 = 선택 토글 (의사 체크박스). 잠금 ON + 기적재면 거부.
+    // Shift+클릭 = anchor ~ 현재 사이를 모두 체크(잠금 시 기적재는 건너뜀).
     private void OnListMouseClick(object? sender, MouseEventArgs e)
     {
         var hit = _list.HitTest(e.Location);
         if (hit.Item is null) return;
         var idx = hit.Item.Index;
         if (idx < 0 || idx >= _viewRows.Count) return;
-        var r = _viewRows[idx];
-        if (_lockArchivedBox.Checked && IsArchived(r)) return;
-        if (!_checkedIds.Add(r.Id)) _checkedIds.Remove(r.Id);   // 있으면 해제, 없으면 추가
-        _list.Invalidate(hit.Item.Bounds);
+
+        if ((Control.ModifierKeys & Keys.Shift) == Keys.Shift && _anchorIndex >= 0 && _anchorIndex < _viewRows.Count)
+        {
+            var lo = Math.Min(_anchorIndex, idx);
+            var hi = Math.Max(_anchorIndex, idx);
+            for (var i = lo; i <= hi; i++)
+            {
+                var rr = _viewRows[i];
+                if (_lockArchivedBox.Checked && IsArchived(rr)) continue;
+                _checkedIds.Add(rr.Id);
+            }
+            _list.Invalidate();
+        }
+        else
+        {
+            var r = _viewRows[idx];
+            if (_lockArchivedBox.Checked && IsArchived(r)) return;
+            if (!_checkedIds.Add(r.Id)) _checkedIds.Remove(r.Id);   // 있으면 해제, 없으면 추가
+            _anchorIndex = idx;
+            _list.Invalidate(hit.Item.Bounds);
+        }
         UpdateSelInfo();
     }
 
