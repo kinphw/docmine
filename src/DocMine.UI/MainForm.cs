@@ -49,7 +49,6 @@ public sealed class MainForm : Form
         // 기능 탭 인스턴스 (재사용 — 전환해도 상태 유지).
         var scan      = new ScanTab();
         var insert    = new InsertTab();
-        var preflight = new PreflightTab();
         var search    = new SearchTab();
         var extractor = new ExtractorTab();
         var dbExport  = new DbExportTab();
@@ -66,7 +65,7 @@ public sealed class MainForm : Form
             SizeMode = TabSizeMode.Fixed,
             ItemSize = new Size(0, 1),
         };
-        foreach (var c in new TabPage[] { scan, insert, preflight, search, extractor, dbExport, _settingsTab })
+        foreach (var c in new TabPage[] { scan, insert, search, extractor, dbExport, _settingsTab })
         {
             _host.TabPages.Add(c);
             _contents.Add(c);
@@ -84,7 +83,7 @@ public sealed class MainForm : Form
             Padding = new Padding(0, 6, 0, 6),
             AutoScroll = true,
         };
-        AddNavGroup(nav, "파이프라인", ("스캔", scan), ("적재", insert), ("적재 전 검증", preflight), ("반출", dbExport));
+        AddNavGroup(nav, "파이프라인", ("스캔", scan), ("적재", insert), ("반출", dbExport));
         AddNavGroup(nav, "조회", ("검색", search));
         AddNavGroup(nav, "도구", ("문서 추출", extractor));
         AddNavGroup(nav, "설정", ("DB 설정", _settingsTab));
