@@ -21,8 +21,8 @@ namespace DocMine.UI;
 public sealed class MainForm : Form
 {
     private SettingsTab? _settingsTab;
-    private readonly List<Control> _contents = new();   // IBusyTab 순회 대상
-    private Panel _host = null!;
+    private readonly List<TabPage> _contents = new();   // IBusyTab 순회 대상
+    private TabControl _host = null!;                   // 헤더 숨긴 TabControl — 사이드 네비가 SelectedTab 전환
     private Button? _currentNav;
 
     private static readonly Color NavBg       = Color.FromArgb(0x2b, 0x2b, 0x2b);
@@ -56,13 +56,19 @@ public sealed class MainForm : Form
         _settingsTab  = new SettingsTab();
 
         // ── ① Fill: 콘텐츠 호스트 ─────────────────────────────────────
-        // 선택된 탭만 _host 에 Add (나머지는 Remove — 인스턴스는 _contents 에
-        // 보관해 상태 유지). TabPage.Visible 토글은 TabControl 밖에서 불안정해
-        // Controls 교체 방식을 쓴다.
-        _host = new Panel { Dock = DockStyle.Fill };
-        foreach (var c in new Control[] { scan, insert, preflight, search, extractor, dbExport, _settingsTab })
+        // 기능 탭이 TabPage 라 일반 Panel 에 못 넣는다 → 헤더를 숨긴 TabControl 을
+        // 호스트로 쓰고, 사이드 네비가 SelectedTab 을 바꾼다. (ItemSize 높이 1 +
+        // FlatButtons 로 탭 헤더 사실상 비표시.)
+        _host = new TabControl
         {
-            c.Dock = DockStyle.Fill;
+            Dock = DockStyle.Fill,
+            Appearance = TabAppearance.FlatButtons,
+            SizeMode = TabSizeMode.Fixed,
+            ItemSize = new Size(0, 1),
+        };
+        foreach (var c in new TabPage[] { scan, insert, preflight, search, extractor, dbExport, _settingsTab })
+        {
+            _host.TabPages.Add(c);
             _contents.Add(c);
         }
         Controls.Add(_host);
@@ -107,7 +113,7 @@ public sealed class MainForm : Form
     }
 
     // 그룹 헤더(비클릭) + 항목 버튼들을 네비에 추가.
-    private void AddNavGroup(FlowLayoutPanel nav, string header, params (string Label, Control Content)[] items)
+    private void AddNavGroup(FlowLayoutPanel nav, string header, params (string Label, TabPage Content)[] items)
     {
         nav.Controls.Add(new Label
         {
@@ -140,13 +146,9 @@ public sealed class MainForm : Form
         }
     }
 
-    private void ShowContent(Control content, Button navBtn)
+    private void ShowContent(TabPage content, Button navBtn)
     {
-        if (!_host.Controls.Contains(content))
-        {
-            _host.Controls.Clear();          // 인스턴스는 _contents 가 보관 — Dispose 안 됨
-            _host.Controls.Add(content);
-        }
+        _host.SelectedTab = content;
 
         if (_currentNav is not null)
         {
