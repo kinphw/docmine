@@ -27,6 +27,7 @@
 
 using System.Text;
 using System.Text.Json;
+using DocMine.Core.Diff;
 using DocMine.Core.Hwp;
 
 namespace DocMine.UI.Worker;
@@ -76,6 +77,16 @@ internal static class HwpWorkerEntry
             {
                 Console.Error.WriteLine("[HwpWorker] quit received");
                 break;
+            }
+            if (req.Op == "parse2")
+            {
+                WriteResponse2(HandleParse2(req, zipReader, sectionParser, com));
+                continue;
+            }
+            if (req.Op == "report")
+            {
+                WriteResponse(HandleReport(req, com));
+                continue;
             }
             if (req.Op != "parse")
             {
@@ -131,6 +142,65 @@ internal static class HwpWorkerEntry
         }
     }
 
+    // ── parse2: 구조화 추출 (문서 비교 v2) ────────────────────────────────
+    //   .hwpx(비DRM) → ZIP 직접 파싱.
+    //   .hwp(바이너리) / DRM .hwpx → COM 으로 HWPX 정규화(SaveAs) 후 ZIP 파싱.
+    //   임시본이 DLP 에 재암호화돼 ZIP 파싱이 실패하면 error 로 반환 → 호출자가 평문 폴백.
+    private static ParseResponse2 HandleParse2(
+        ParseRequest req,
+        HwpxZipReader zipReader,
+        SectionParser sectionParser,
+        HwpComExtractor com)
+    {
+        string? temp = null;
+        try
+        {
+            var ext = (req.Ext ?? "").ToLowerInvariant();
+            HwpxDocument doc;
+
+            if (ext == ".hwpx" && !HwpxZipReader.IsDrmProtected(req.Path))
+            {
+                doc = zipReader.ReadDocument(req.Path, sectionParser);
+            }
+            else
+            {
+                temp = com.SaveAsHwpx(req.Path, Path.GetTempPath());
+                doc = zipReader.ReadDocument(temp, sectionParser);
+            }
+
+            return new ParseResponse2(req.Idx, "success", DocStructure.FromHwpx(doc), null);
+        }
+        catch (Exception ex)
+        {
+            var msg = ex.Message;
+            if (msg.Length > 900) msg = msg[..900];
+            return new ParseResponse2(req.Idx, "error", null, msg);
+        }
+        finally
+        {
+            if (temp is not null) { try { File.Delete(temp); } catch { } }
+        }
+    }
+
+    // ── report: 비교 결과를 색상 입힌 HWP/HWPX 문서로 생성 ─────────────────
+    private static ParseResponse HandleReport(ParseRequest req, HwpComExtractor com)
+    {
+        try
+        {
+            if (req.Report is null)
+                return new ParseResponse(req.Idx, "error", null, "report 요청에 본문(runs)이 없습니다.");
+            var format = string.IsNullOrWhiteSpace(req.Ext) ? "HWPX" : req.Ext!.ToUpperInvariant();
+            com.WriteReport(req.Report, req.Path, format);
+            return new ParseResponse(req.Idx, "success", null, null);
+        }
+        catch (Exception ex)
+        {
+            var msg = ex.Message;
+            if (msg.Length > 900) msg = msg[..900];
+            return new ParseResponse(req.Idx, "error", null, msg);
+        }
+    }
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -144,6 +214,14 @@ internal static class HwpWorkerEntry
         Console.Out.Flush();
     }
 
-    private sealed record ParseRequest(string Op, int Idx, string Path, string? Ext);
+    private static void WriteResponse2(ParseResponse2 resp)
+    {
+        var json = JsonSerializer.Serialize(resp, JsonOpts);
+        Console.Out.WriteLine(json);
+        Console.Out.Flush();
+    }
+
+    private sealed record ParseRequest(string Op, int Idx, string Path, string? Ext, ReportDoc? Report = null);
     private sealed record ParseResponse(int Idx, string Status, string? Text, string? Err);
+    private sealed record ParseResponse2(int Idx, string Status, DocStructure? Doc, string? Err);
 }

@@ -37,9 +37,9 @@
          Windows 의 4-tuple 만 허용하므로 numeric base 만. pre-release 사이클
          에도 같은 base 숫자 유지.
          Python 판 0.4.3 다음이지만 C# 포트는 별도 트랙으로 0.5.0 부터 시작. -->
-    <Version>0.5.3</Version>
-    <FileVersion>0.5.3.0</FileVersion>
-    <AssemblyVersion>0.5.3.0</AssemblyVersion>
+    <Version>0.5.4-dev</Version>
+    <FileVersion>0.5.4.0</FileVersion>
+    <AssemblyVersion>0.5.4.0</AssemblyVersion>
     <InformationalVersion>$(Version)</InformationalVersion>
     <!-- .NET SDK 가 build 시 git commit hash 를 InformationalVersion 에
          자동 append (예: "0.5.0+ccc7930...") 하는 동작 끄기. About 다이얼로그에

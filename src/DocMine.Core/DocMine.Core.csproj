@@ -22,6 +22,9 @@
   <ItemGroup>
     <PackageReference Include="MySqlConnector" Version="2.3.7" />
     <PackageReference Include="PdfPig" Version="0.1.14" />
+    <!-- DiffPlex — 문서 비교(라인 + 단어 단위) 엔진. MIT, 순수 매니지드, 무의존.
+         네이티브 dll 없어 FDD 단일 exe 방침에 부합. -->
+    <PackageReference Include="DiffPlex" Version="1.7.2" />
   </ItemGroup>
 
 </Project>

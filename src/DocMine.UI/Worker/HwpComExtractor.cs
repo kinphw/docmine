@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Text.RegularExpressions;
 using System.Runtime.InteropServices;
+using DocMine.Core.Diff;
 
 namespace DocMine.UI.Worker;
 
@@ -61,6 +62,144 @@ internal sealed class HwpComExtractor : IDisposable
             Thread.Sleep(1000);
         }
         return text;
+    }
+
+    /// <summary>
+    /// 파일을 COM 으로 열어 HWPX 로 SaveAs — 바이너리 .hwp / DRM 을 구조 파서(ZIP) 로
+    /// 흘려보내기 위한 정규화. 성공 시 임시 .hwpx 경로 반환(호출자가 삭제 책임).
+    /// </summary>
+    /// <remarks>
+    /// 주의: DRM/DLP 환경에서는 디스크에 쓴 임시본이 자동 재암호화될 수 있다.
+    /// 그 경우 호출자(ZIP 파서) 가 DRM 으로 인식해 실패하므로 평문 비교로 폴백한다.
+    /// </remarks>
+    public string SaveAsHwpx(string filePath, string outDir)
+    {
+        var hwp = GetCom();
+        try { hwp.SetMessageBoxMode(0x10000); } catch { }
+
+        hwp.Open(Path.GetFullPath(filePath), "", "forceopen:true;versionwarning:false");
+
+        var outPath = Path.Combine(outDir, $"docmine_cmp_{Guid.NewGuid():N}.hwpx");
+
+        bool ok;
+        try
+        {
+            // 한컴 COM: SaveAs(Path, Format, arg). HWPX = OWPML(zip) 포맷.
+            object? rv = hwp.SaveAs(outPath, "HWPX", "");
+            ok = rv switch { bool b => b, null => false, _ => Convert.ToBoolean(rv) };
+        }
+        catch
+        {
+            ok = false;
+        }
+        finally
+        {
+            try { hwp.XHwpDocuments.Item(0).SetModified(false); } catch { }
+            try { hwp.Run("FileClose"); }                          catch { }
+            try { hwp.SetMessageBoxMode(0xF0000); }                catch { }
+        }
+
+        _comCount++;
+        if (_comCount % _restartEvery == 0)
+        {
+            ReleaseCom();
+            if (_killOnRestart) KillHwpProcesses();
+            Thread.Sleep(1000);
+        }
+
+        if (!ok)
+            throw new InvalidOperationException(
+                $"SaveAs HWPX 실패 — 이 한/글 버전이 HWPX 내보내기를 지원하지 않거나 거부함: {Path.GetFileName(filePath)}");
+        if (!File.Exists(outPath))
+            throw new InvalidOperationException($"SaveAs 결과 파일이 없습니다: {outPath}");
+
+        return outPath;
+    }
+
+    /// <summary>
+    /// 비교 결과(ReportDoc)를 새 한/글 문서로 만들어 저장 — 글자색으로 추가/삭제/수정 구분.
+    /// (forge 의 COM 텍스트 삽입·서식 패턴 차용: CreateAction 5단계 + CharShape TextColor.)
+    /// </summary>
+    /// <param name="format">"HWP" 또는 "HWPX".</param>
+    public void WriteReport(ReportDoc doc, string outPath, string format)
+    {
+        var hwp = GetCom();
+        try { hwp.SetMessageBoxMode(0x10000); } catch { }
+
+        try
+        {
+            hwp.Run("FileNew");
+
+            foreach (var run in doc.Runs)
+            {
+                if (!string.IsNullOrEmpty(run.Text))
+                {
+                    SetTextColor(hwp, run.R, run.G, run.B);
+                    if (run.Bold) hwp.HAction.Run("CharShapeBold");
+                    InsertText(hwp, run.Text);
+                    if (run.Bold) hwp.HAction.Run("CharShapeBold");
+                }
+                for (int i = 0; i < run.Breaks; i++)
+                    hwp.HAction.Run("BreakPara");
+            }
+
+            var outFull = Path.GetFullPath(outPath).Replace('/', '\\');
+            bool ok = SaveAs(hwp, outFull, format);
+
+            try { hwp.XHwpDocuments.Item(0).SetModified(false); } catch { }
+            try { hwp.Run("FileClose"); }                          catch { }
+
+            if (!ok)
+                throw new InvalidOperationException(
+                    $"리포트 SaveAs({format}) 실패 — 한/글이 해당 포맷 저장을 거부했습니다.");
+            if (!File.Exists(outFull))
+                throw new InvalidOperationException($"리포트 파일이 생성되지 않았습니다: {outFull}");
+        }
+        finally
+        {
+            try { hwp.SetMessageBoxMode(0xF0000); } catch { }
+        }
+
+        _comCount++;
+        if (_comCount % _restartEvery == 0)
+        {
+            ReleaseCom();
+            if (_killOnRestart) KillHwpProcesses();
+            Thread.Sleep(1000);
+        }
+    }
+
+    // ─ COM 편집 보조 (forge ComHelpers/Primitives 패턴) ──────────────────
+
+    private static void InsertText(dynamic hwp, string text)
+    {
+        var act = hwp.CreateAction("InsertText");
+        var s = act.CreateSet();
+        act.GetDefault(s);
+        s.SetItem("Text", text);
+        act.Execute(s);
+    }
+
+    private static void SetTextColor(dynamic hwp, int r, int g, int b)
+    {
+        var act = hwp.CreateAction("CharShape");
+        var s = act.CreateSet();
+        act.GetDefault(s);
+        s.SetItem("TextColor", hwp.RGBColor(r, g, b));
+        act.Execute(s);
+    }
+
+    private static bool SaveAs(dynamic hwp, string path, string format)
+    {
+        try
+        {
+            object? rv = hwp.SaveAs(path, format, "");
+            return rv switch { bool b => b, null => false, _ => Convert.ToBoolean(rv) };
+        }
+        catch
+        {
+            try { hwp.SaveAs(path); return File.Exists(path); } catch { return false; }
+        }
     }
 
     private dynamic GetCom()
