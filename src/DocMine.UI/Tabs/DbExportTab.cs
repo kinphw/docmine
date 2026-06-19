@@ -30,7 +30,8 @@ public sealed class DbExportTab : TabPage
     // 가상화 — 표시 대상(필터 적용) + 체크 상태(ExportRow.Id 집합).
     private readonly List<ExportRow> _viewRows = new();
     private readonly HashSet<int> _checkedIds = new();
-    private int _anchorIndex = -1;   // Shift+클릭 범위 선택의 기준점
+    private int _anchorIndex = -1;    // Shift+클릭 범위의 기준점
+    private bool _anchorChecked;      // 기준점을 마지막으로 설정한 상태(체크/해제) — Shift 범위에 그대로 적용
 
     private readonly TextBox _keywordBox;
     private readonly RadioButton _targetBoth, _targetTitle, _targetBody;
@@ -238,12 +239,20 @@ public sealed class DbExportTab : TabPage
         bot.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         bot.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
+        var leftFlow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, Anchor = AnchorStyles.Left };
         _selInfoLabel = new Label
         {
             Text = "0건 선택됨", AutoSize = true, ForeColor = Color.Gray,
             Padding = new Padding(0, 8, 0, 0), Font = new Font("맑은 고딕", 9),
         };
-        bot.Controls.Add(_selInfoLabel, 0, 0);
+        var hintLabel = new Label
+        {
+            Text = "(행 클릭=선택 · Shift+클릭=범위 선택/해제)", AutoSize = true, ForeColor = Color.DarkGray,
+            Padding = new Padding(12, 8, 0, 0), Font = new Font("맑은 고딕", 9),
+        };
+        leftFlow.Controls.Add(_selInfoLabel);
+        leftFlow.Controls.Add(hintLabel);
+        bot.Controls.Add(leftFlow, 0, 0);
 
         var btnFlow = new FlowLayoutPanel
         {
@@ -428,13 +437,15 @@ public sealed class DbExportTab : TabPage
 
         if ((Control.ModifierKeys & Keys.Shift) == Keys.Shift && _anchorIndex >= 0 && _anchorIndex < _viewRows.Count)
         {
+            // Shift+클릭 — 기준점에서 한 동작(체크/해제)을 범위 전체에 그대로 적용.
+            // 잠금 ON 이면 기적재 행은 건드리지 않는다.
             var lo = Math.Min(_anchorIndex, idx);
             var hi = Math.Max(_anchorIndex, idx);
             for (var i = lo; i <= hi; i++)
             {
                 var rr = _viewRows[i];
                 if (_lockArchivedBox.Checked && IsArchived(rr)) continue;
-                _checkedIds.Add(rr.Id);
+                if (_anchorChecked) _checkedIds.Add(rr.Id); else _checkedIds.Remove(rr.Id);
             }
             _list.Invalidate();
         }
@@ -442,7 +453,8 @@ public sealed class DbExportTab : TabPage
         {
             var r = _viewRows[idx];
             if (_lockArchivedBox.Checked && IsArchived(r)) return;
-            if (!_checkedIds.Add(r.Id)) _checkedIds.Remove(r.Id);   // 있으면 해제, 없으면 추가
+            _anchorChecked = _checkedIds.Add(r.Id);   // Add 성공=새로 체크됨 / 실패=이미 있어 해제
+            if (!_anchorChecked) _checkedIds.Remove(r.Id);
             _anchorIndex = idx;
             _list.Invalidate(hit.Item.Bounds);
         }

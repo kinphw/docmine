@@ -46,7 +46,8 @@ public sealed class InsertTab : TabPage, IBusyTab
     private readonly List<Row> _all = new();
     private readonly List<Row> _viewRows = new();
     private readonly HashSet<(string, string)> _checkedKeys = new();   // NormKey 로 선택 추적
-    private int _anchorIndex = -1;   // Shift+클릭 범위 선택의 기준점
+    private int _anchorIndex = -1;    // Shift+클릭 범위의 기준점
+    private bool _anchorChecked;      // 기준점을 마지막으로 설정한 상태(체크/해제) — Shift 범위에 그대로 적용
 
     public InsertTab() : base("② 적재")
     {
@@ -54,11 +55,10 @@ public sealed class InsertTab : TabPage, IBusyTab
 
         var root = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(8),
+            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(8),
         };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 입력/대상/검증
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // 검증 리스트
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 적재 버튼
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 로그
 
         // ── 상단 (입력 CSV + 대상 + 검증) ────────────────────────────
@@ -127,40 +127,51 @@ public sealed class InsertTab : TabPage, IBusyTab
         _list.MouseClick += OnListMouseClick;
         root.Controls.Add(_list, 0, 1);
 
-        // ── 적재 버튼 ────────────────────────────────────────────────
-        var actRow = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 1, Padding = new Padding(0, 4, 0, 4) };
-        actRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        actRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        _selInfoLabel = new Label { Text = "0건 선택됨", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(0, 8, 0, 0) };
-        actRow.Controls.Add(_selInfoLabel, 0, 0);
-
-        var actFlow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Anchor = AnchorStyles.Top | AnchorStyles.Right };
-        _stopBtn        = new Button { Text = "중지", AutoSize = true, Enabled = false, Margin = new Padding(6, 0, 0, 0) };
-        _insertSelBtn   = new Button { Text = "선택 항목 적재", AutoSize = true, Enabled = false };
-        _insertAllBtn   = new Button { Text = "미적재 전체 적재", AutoSize = true };
-        _selectNoneBtn  = new Button { Text = "전체 해제", AutoSize = true, Enabled = false, Margin = new Padding(0, 0, 12, 0) };
-        _selectAllBtn   = new Button { Text = "전체 선택", AutoSize = true, Enabled = false };
-        _stopBtn.Click       += (_, _) => OnStop();
-        _insertSelBtn.Click  += async (_, _) => await InsertSelectedAsync();
-        _insertAllBtn.Click  += async (_, _) => await InsertAllAsync();
-        _selectNoneBtn.Click += (_, _) => SetAllChecked(false);
-        _selectAllBtn.Click  += (_, _) => SetAllChecked(true);
-        // RightToLeft — Add 역순 배치.
-        actFlow.Controls.Add(_stopBtn);
-        actFlow.Controls.Add(_insertSelBtn);
-        actFlow.Controls.Add(_insertAllBtn);
-        actFlow.Controls.Add(_selectNoneBtn);
-        actFlow.Controls.Add(_selectAllBtn);
-        actRow.Controls.Add(actFlow, 1, 0);
-        root.Controls.Add(actRow, 0, 2);
-
         // ── 로그 ──────────────────────────────────────────────────────
         _log = new LogPane { Dock = DockStyle.Fill };
         var logFrame = new GroupBox { Text = "로그", Dock = DockStyle.Fill, Height = 150, Padding = new Padding(4) };
         logFrame.Controls.Add(_log);
-        root.Controls.Add(logFrame, 0, 3);
+        root.Controls.Add(logFrame, 0, 2);
 
         Controls.Add(root);
+
+        // ── 하단 액션 바 (Dock=Bottom — 리스트/로그에 가리지 않게 탭 최하단 고정) ──
+        //   왼쪽: 전체 선택/해제 + 선택 정보 + 조작 힌트  |  오른쪽: 적재 액션
+        var bot = new TableLayoutPanel
+        {
+            Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2, RowCount = 1, Padding = new Padding(8, 4, 8, 6),
+        };
+        bot.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        bot.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+        var leftFlow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, Anchor = AnchorStyles.Left };
+        _selectAllBtn  = new Button { Text = "전체 선택", AutoSize = true, Enabled = false };
+        _selectNoneBtn = new Button { Text = "전체 해제", AutoSize = true, Enabled = false, Margin = new Padding(4, 0, 0, 0) };
+        _selInfoLabel  = new Label { Text = "0건 선택됨", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(12, 6, 0, 0) };
+        var hintLabel  = new Label { Text = "(행 클릭=선택 · Shift+클릭=범위 선택/해제)", AutoSize = true, ForeColor = Color.DarkGray, Padding = new Padding(12, 6, 0, 0) };
+        _selectAllBtn.Click  += (_, _) => SetAllChecked(true);
+        _selectNoneBtn.Click += (_, _) => SetAllChecked(false);
+        leftFlow.Controls.Add(_selectAllBtn);
+        leftFlow.Controls.Add(_selectNoneBtn);
+        leftFlow.Controls.Add(_selInfoLabel);
+        leftFlow.Controls.Add(hintLabel);
+        bot.Controls.Add(leftFlow, 0, 0);
+
+        var actFlow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+        _stopBtn      = new Button { Text = "중지", AutoSize = true, Enabled = false, Margin = new Padding(6, 0, 0, 0) };
+        _insertSelBtn = new Button { Text = "선택 항목 적재", AutoSize = true, Enabled = false };
+        _insertAllBtn = new Button { Text = "미적재 전체 적재", AutoSize = true, Margin = new Padding(6, 0, 0, 0) };
+        _stopBtn.Click      += (_, _) => OnStop();
+        _insertSelBtn.Click += async (_, _) => await InsertSelectedAsync();
+        _insertAllBtn.Click += async (_, _) => await InsertAllAsync();
+        // RightToLeft — 먼저 Add 한 것이 오른쪽. 표시: 미적재 전체 적재 · 선택 항목 적재 · 중지
+        actFlow.Controls.Add(_stopBtn);
+        actFlow.Controls.Add(_insertSelBtn);
+        actFlow.Controls.Add(_insertAllBtn);
+        bot.Controls.Add(actFlow, 1, 0);
+
+        Controls.Add(bot);
 
         VisibleChanged += (_, _) =>
         {
@@ -275,13 +286,15 @@ public sealed class InsertTab : TabPage, IBusyTab
 
         if ((Control.ModifierKeys & Keys.Shift) == Keys.Shift && _anchorIndex >= 0 && _anchorIndex < _viewRows.Count)
         {
-            // Shift+클릭 — anchor ~ 현재 사이를 모두 체크.
+            // Shift+클릭 — 기준점(anchor)에서 한 동작을 범위 전체에 그대로 적용.
+            //   직전에 기준점을 '체크'했으면 범위를 체크, '해제'했으면 범위를 해제.
             var lo = Math.Min(_anchorIndex, idx);
             var hi = Math.Max(_anchorIndex, idx);
             for (var i = lo; i <= hi; i++)
             {
                 var cc = _viewRows[i].Csv;
-                _checkedKeys.Add(CsvIngestHelpers.NormKey(cc.Directory, cc.Filename));
+                var k = CsvIngestHelpers.NormKey(cc.Directory, cc.Filename);
+                if (_anchorChecked) _checkedKeys.Add(k); else _checkedKeys.Remove(k);
             }
             _list.Invalidate();
         }
@@ -289,7 +302,8 @@ public sealed class InsertTab : TabPage, IBusyTab
         {
             var c = _viewRows[idx].Csv;
             var key = CsvIngestHelpers.NormKey(c.Directory, c.Filename);
-            if (!_checkedKeys.Add(key)) _checkedKeys.Remove(key);   // 토글
+            _anchorChecked = _checkedKeys.Add(key);   // Add 성공=새로 체크됨 / 실패=이미 있어 해제
+            if (!_anchorChecked) _checkedKeys.Remove(key);
             _anchorIndex = idx;
             _list.Invalidate(hit.Item.Bounds);
         }
