@@ -6,15 +6,17 @@
 
 namespace DocMine.Core.Diff;
 
-/// <summary>글자색·굵기가 지정된 텍스트 한 조각. Breaks 만큼 뒤에 문단 나눔.</summary>
+/// <summary>글자색·굵기·취소선·밑줄이 지정된 텍스트 한 조각. Breaks 만큼 뒤에 문단 나눔.</summary>
 public sealed class ReportRun
 {
-    public string Text   { get; set; } = "";
-    public int    R      { get; set; }
-    public int    G      { get; set; }
-    public int    B      { get; set; }
-    public bool   Bold   { get; set; }
-    public int    Breaks { get; set; }   // 이 런 뒤에 넣을 문단 나눔(BreakPara) 수
+    public string Text      { get; set; } = "";
+    public int    R         { get; set; }
+    public int    G         { get; set; }
+    public int    B         { get; set; }
+    public bool   Bold      { get; set; }
+    public bool   Strike    { get; set; }   // 취소선 (변경추적: 삭제)
+    public bool   Underline { get; set; }   // 밑줄   (변경추적: 추가)
+    public int    Breaks    { get; set; }   // 이 런 뒤에 넣을 문단 나눔(BreakPara) 수
 }
 
 public sealed class ReportDoc

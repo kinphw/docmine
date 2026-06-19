@@ -157,6 +157,7 @@ internal static class HwpWorkerEntry
         {
             var ext = (req.Ext ?? "").ToLowerInvariant();
             HwpxDocument doc;
+            int pages = 0;
 
             if (ext == ".hwpx" && !HwpxZipReader.IsDrmProtected(req.Path))
             {
@@ -165,10 +166,13 @@ internal static class HwpWorkerEntry
             else
             {
                 temp = com.SaveAsHwpx(req.Path, Path.GetTempPath());
+                pages = com.LastPageCount;   // COM 으로 연 경우만 페이지 수 확보
                 doc = zipReader.ReadDocument(temp, sectionParser);
             }
 
-            return new ParseResponse2(req.Idx, "success", DocStructure.FromHwpx(doc), null);
+            var structure = DocStructure.FromHwpx(doc);
+            structure.Pages = pages;
+            return new ParseResponse2(req.Idx, "success", structure, null);
         }
         catch (Exception ex)
         {

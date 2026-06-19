@@ -19,6 +19,9 @@ internal sealed class HwpComExtractor : IDisposable
     private readonly int _restartEvery;
     private readonly bool _killOnRestart;
 
+    /// <summary>직전 SaveAsHwpx 가 연 문서의 페이지 수(렌더 결과). 못 읽으면 0.</summary>
+    public int LastPageCount { get; private set; }
+
     /// <param name="killOnRestart">COM 재활용·Dispose 시 PC 의 Hwp.exe 를 모두 정리할지.
     /// 배치 적재(HwpInsertRunner) 는 시작 시 이미 좀비 정리를 하므로 true.
     /// 인터랙티브 추출기(ExtractorTab) 는 사용자가 띄워둔 한/글 보호 위해 false.</param>
@@ -79,6 +82,10 @@ internal sealed class HwpComExtractor : IDisposable
 
         hwp.Open(Path.GetFullPath(filePath), "", "forceopen:true;versionwarning:false");
 
+        // 페이지 수(렌더 결과) — 비교 요약 표기용. 버전/문서에 따라 0 일 수 있어 best-effort.
+        LastPageCount = 0;
+        try { LastPageCount = Convert.ToInt32(hwp.PageCount); } catch { }
+
         var outPath = Path.Combine(outDir, $"docmine_cmp_{Guid.NewGuid():N}.hwpx");
 
         bool ok;
@@ -134,10 +141,9 @@ internal sealed class HwpComExtractor : IDisposable
             {
                 if (!string.IsNullOrEmpty(run.Text))
                 {
-                    SetTextColor(hwp, run.R, run.G, run.B);
-                    if (run.Bold) hwp.HAction.Run("CharShapeBold");
+                    // 런마다 모든 글자속성을 명시 — 직전 런 상태가 새어나가지 않게.
+                    SetCharShape(hwp, run.R, run.G, run.B, run.Bold, run.Strike, run.Underline);
                     InsertText(hwp, run.Text);
-                    if (run.Bold) hwp.HAction.Run("CharShapeBold");
                 }
                 for (int i = 0; i < run.Breaks; i++)
                     hwp.HAction.Run("BreakPara");
@@ -180,12 +186,17 @@ internal sealed class HwpComExtractor : IDisposable
         act.Execute(s);
     }
 
-    private static void SetTextColor(dynamic hwp, int r, int g, int b)
+    // 색·굵기·취소선·밑줄을 한 번의 CharShape 액션으로 명시 설정(이후 입력 글자에 적용).
+    // 항목명이 버전마다 다를 수 있어 SetItem 은 개별 try — 일부 실패해도 나머지는 적용.
+    private static void SetCharShape(dynamic hwp, int r, int g, int b, bool bold, bool strike, bool underline)
     {
         var act = hwp.CreateAction("CharShape");
         var s = act.CreateSet();
         act.GetDefault(s);
-        s.SetItem("TextColor", hwp.RGBColor(r, g, b));
+        try { s.SetItem("TextColor", hwp.RGBColor(r, g, b)); } catch { }
+        try { s.SetItem("Bold", bold ? 1 : 0); } catch { }
+        try { s.SetItem("UnderlineType", underline ? 1 : 0); } catch { }
+        try { s.SetItem("StrikeOutType", strike ? 1 : 0); } catch { }
         act.Execute(s);
     }
 

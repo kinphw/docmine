@@ -71,6 +71,68 @@ public static class ReportBuilder
         static string Cell(string s) => s.Length == 0 ? "(빈칸)" : s.Replace("\n", " ");
     }
 
+    /// <summary>변경추적 통합본 → 문서 전체를 한 흐름으로(삭제=취소선, 추가=밑줄).</summary>
+    public static ReportDoc FromUnified(UnifiedDiff diff, string oldPath, string newPath, string summary)
+    {
+        var doc = new ReportDoc();
+        void Run(string text, (int R, int G, int B) c, bool bold = false, bool strike = false, bool underline = false, int breaks = 0)
+            => doc.Runs.Add(new ReportRun { Text = text, R = c.R, G = c.G, B = c.B, Bold = bold, Strike = strike, Underline = underline, Breaks = breaks });
+
+        Run("문서 변경 리포트 (변경추적)", Black, bold: true, breaks: 2);
+        Run("변경 전: " + oldPath, Grey, breaks: 1);
+        Run("변경 후: " + newPath, Grey, breaks: 1);
+        Run(summary, Black, bold: true, breaks: 1);
+        Run("범례:  삭제=취소선(빨강)  ·  추가=밑줄(초록)", Grey, breaks: 1);
+        Run("────────────────────────────────────────", Grey, breaks: 2);
+
+        foreach (var it in diff.Items)
+        {
+            if (it.Kind == UnifiedItemKind.Paragraph)
+            {
+                if (it.Runs.Count == 0) { Run("", Black, breaks: 1); continue; }
+                for (int i = 0; i < it.Runs.Count; i++)
+                {
+                    var pr = it.Runs[i];
+                    var (color, strike, underline) = StyleOf(pr.Kind);
+                    Run(pr.Text, color, strike: strike, underline: underline,
+                        breaks: i == it.Runs.Count - 1 ? 1 : 0);
+                }
+            }
+            else // 표
+            {
+                switch (it.LineKind)
+                {
+                    case DiffChangeKind.Unchanged:
+                        Run($"［표 {it.OldDims}］", Grey, breaks: 1); break;
+                    case DiffChangeKind.Inserted:
+                        Run($"［표 추가 {it.NewDims}］", Green, underline: true, breaks: 1); break;
+                    case DiffChangeKind.Deleted:
+                        Run($"［표 삭제 {it.OldDims}］", Red, strike: true, breaks: 1); break;
+                    case DiffChangeKind.Modified:
+                        Run($"［표 변경 {it.OldDims} → {it.NewDims}］", Blue, bold: true, breaks: 1);
+                        if (it.Cells is { Count: > 0 })
+                            foreach (var c in it.Cells)
+                            {
+                                Run($"   [{c.Row + 1}행 {c.Col + 1}열]  ", Black);
+                                Run(Cell(c.Old), Red, strike: true);
+                                Run("  →  ", Black);
+                                Run(Cell(c.New), Green, underline: true, breaks: 1);
+                            }
+                        break;
+                }
+            }
+        }
+        return doc;
+
+        static ((int R, int G, int B) color, bool strike, bool underline) StyleOf(DiffChangeKind k) => k switch
+        {
+            DiffChangeKind.Deleted  => (Red, true, false),
+            DiffChangeKind.Inserted => (Green, false, true),
+            _                       => (Black, false, false),
+        };
+        static string Cell(string s) => s.Length == 0 ? "(빈칸)" : s.Replace("\n", " ");
+    }
+
     /// <summary>평문 좌우대조 결과 → 변경 줄만 모은 리포트(추가/삭제/수정).</summary>
     public static ReportDoc FromText(SideBySideDiff diff, string oldPath, string newPath, string summary)
     {

@@ -2,10 +2,11 @@
 //
 // 회사에서 변경내용추적을 쓰지 않아 두 버전 사이 차이를 알기 어려운 문제를 해결.
 //
-// 두 가지 비교 방식:
-//   ㆍ 구조 비교(v2, 기본): 문단/표 단위로 정렬해 "제2조 › 문단 5 수정", "표 2행2열 변경"
-//                           처럼 위치와 함께 변경 목록을 보여준다.
-//   ㆍ 평문 좌우대조(v1):   본문 텍스트를 라인 단위로 좌우 대조 + 단어 하이라이트.
+// 세 가지 보기:
+//   ㆍ 변경추적(기본): 변경 전/후를 한 흐름으로 병합 — 삭제=빨강 취소선, 추가=초록 밑줄.
+//                      파일을 열지 않고도 화면에서 전체 문서를 읽으며 변경점을 따라간다.
+//   ㆍ 변경 목록:      문단/표 단위로 "제2조 › 문단 5 수정" 처럼 변경만 위치와 함께 나열.
+//   ㆍ 좌우대조:        본문 텍스트를 라인 단위로 좌우 대조 + 단어 하이라이트.
 //
 // 추출은 기존 --hwp-worker 재사용 — 모든 파일 내용 읽기는 워커(자식 프로세스)에서만.
 //   구조 추출: 비DRM .hwpx 는 ZIP 직접, 바이너리 .hwp / DRM 은 COM SaveAs→HWPX 정규화.
@@ -23,14 +24,20 @@ public sealed class CompareTab : TabPage, IBusyTab
     private static readonly HashSet<string> SupportedExts =
         new(StringComparer.OrdinalIgnoreCase) { ".hwp", ".hwpx" };
 
+    // 무관 문서로 의심할 변경 비율 임계 — 넘으면 요약에 경고.
+    private const double UnrelatedRatio = 0.85;
+
+    private enum Mode { Track, Struct, Text }
+
     private readonly TextBox _oldBox, _newBox;
     private readonly Button  _compareBtn, _swapBtn, _saveBtn;
-    private readonly RadioButton _modeStruct, _modeText;
+    private readonly RadioButton _modeTrack, _modeStruct, _modeText;
     private readonly CheckBox _ignoreWsBox, _changedOnlyBox;
     private readonly Label   _summary;
 
-    private readonly SideBySideDiffView  _textView   = new() { Dock = DockStyle.Fill, Visible = false };
-    private readonly StructureDiffView   _structView = new() { Dock = DockStyle.Fill, Visible = true  };
+    private readonly TrackChangesView   _trackView  = new() { Dock = DockStyle.Fill, Visible = true  };
+    private readonly SideBySideDiffView _textView   = new() { Dock = DockStyle.Fill, Visible = false };
+    private readonly StructureDiffView  _structView = new() { Dock = DockStyle.Fill, Visible = false };
 
     private readonly DocumentComparer          _comparer       = new();
     private readonly DocumentStructureComparer _structComparer = new();
@@ -40,7 +47,11 @@ public sealed class CompareTab : TabPage, IBusyTab
     private DocStructure? _oldStruct, _newStruct;
     private SideBySideDiff? _lastTextDiff;
     private StructureDiff?  _lastStructDiff;
+    private UnifiedDiff?    _lastUnified;
+
+    private HwpWorkerClient? _activeWorker;   // 비교 취소용 — 중단 시 Dispose 로 워커 회수.
     private bool _busy;
+    private bool _cancelRequested;
 
     public CompareTab() : base("⑤ 문서 비교")
     {
@@ -76,15 +87,17 @@ public sealed class CompareTab : TabPage, IBusyTab
         _compareBtn = new Button { Text = "비교", AutoSize = true };
         _swapBtn    = new Button { Text = "↔ 전/후 바꿈", AutoSize = true, Margin = new Padding(8, 0, 0, 0) };
 
-        _modeStruct = new RadioButton { Text = "구조 비교(문단·표)", AutoSize = true, Checked = true,  Margin = new Padding(16, 4, 0, 0) };
-        _modeText   = new RadioButton { Text = "평문 좌우대조",       AutoSize = true, Checked = false, Margin = new Padding(4, 4, 0, 0) };
+        _modeTrack  = new RadioButton { Text = "변경추적", AutoSize = true, Checked = true,  Margin = new Padding(16, 4, 0, 0) };
+        _modeStruct = new RadioButton { Text = "변경 목록", AutoSize = true, Checked = false, Margin = new Padding(4, 4, 0, 0) };
+        _modeText   = new RadioButton { Text = "좌우대조",   AutoSize = true, Checked = false, Margin = new Padding(4, 4, 0, 0) };
 
         _changedOnlyBox = new CheckBox { Text = "변경된 부분만", AutoSize = true, Checked = true, Enabled = false, Margin = new Padding(16, 4, 0, 0) };
         _ignoreWsBox    = new CheckBox { Text = "공백 변화 무시", AutoSize = true, Checked = true, Margin = new Padding(8, 4, 0, 0) };
         _saveBtn        = new Button   { Text = "결과 저장…", AutoSize = true, Enabled = false, Margin = new Padding(16, 0, 0, 0) };
 
-        _compareBtn.Click += async (_, _) => await CompareAsync();
+        _compareBtn.Click += async (_, _) => { if (_busy) CancelCompare(); else await CompareAsync(); };
         _swapBtn.Click    += (_, _) => { (_oldBox.Text, _newBox.Text) = (_newBox.Text, _oldBox.Text); };
+        _modeTrack.CheckedChanged  += (_, _) => OnModeChanged();
         _modeStruct.CheckedChanged += (_, _) => OnModeChanged();
         _modeText.CheckedChanged   += (_, _) => OnModeChanged();
         _changedOnlyBox.CheckedChanged += (_, _) => { var d = _lastTextDiff; if (d is not null && _modeText.Checked) _textView.Render(d, _changedOnlyBox.Checked); };
@@ -93,6 +106,7 @@ public sealed class CompareTab : TabPage, IBusyTab
 
         bar.Controls.Add(_compareBtn);
         bar.Controls.Add(_swapBtn);
+        bar.Controls.Add(_modeTrack);
         bar.Controls.Add(_modeStruct);
         bar.Controls.Add(_modeText);
         bar.Controls.Add(_changedOnlyBox);
@@ -106,8 +120,9 @@ public sealed class CompareTab : TabPage, IBusyTab
             Text = "변경 전/후 문서를 선택하고 [비교] 를 누르세요. (.hwp / .hwpx)",
         };
 
-        // ── 결과 뷰 (구조/평문 토글) ────────────────────────────────────
+        // ── 결과 뷰 (변경추적/목록/좌우대조 토글) ───────────────────────
         var viewFrame = new GroupBox { Text = "비교 결과", Dock = DockStyle.Fill, Padding = new Padding(4) };
+        viewFrame.Controls.Add(_trackView);
         viewFrame.Controls.Add(_textView);
         viewFrame.Controls.Add(_structView);
 
@@ -122,6 +137,9 @@ public sealed class CompareTab : TabPage, IBusyTab
         root.Controls.Add(viewFrame, 0, 3);
         Controls.Add(root);
     }
+
+    private Mode CurrentMode =>
+        _modeTrack.Checked ? Mode.Track : _modeStruct.Checked ? Mode.Struct : Mode.Text;
 
     private void EnableDrop(TextBox box, TextBox other)
     {
@@ -155,16 +173,19 @@ public sealed class CompareTab : TabPage, IBusyTab
 
     private void OnModeChanged()
     {
-        // 모드 전환은 추출 방식이 다르므로 결과를 비우고 재비교를 요청.
+        // 모드 전환은 추출 방식이 다를 수 있어 결과를 비우고 재비교를 요청.
         _changedOnlyBox.Enabled = _modeText.Checked;
-        _textView.Visible   = _modeText.Checked;
+        _trackView.Visible  = _modeTrack.Checked;
         _structView.Visible = _modeStruct.Checked;
-        _textView.Clear();
+        _textView.Visible   = _modeText.Checked;
+        _trackView.Clear();
         _structView.Clear();
+        _textView.Clear();
         _oldText = _newText = null;
         _oldStruct = _newStruct = null;
         _lastTextDiff = null;
         _lastStructDiff = null;
+        _lastUnified = null;
         _saveBtn.Enabled = false;
         _summary.Text = "비교 방식을 바꿨습니다 — [비교] 를 다시 누르세요.";
     }
@@ -177,85 +198,120 @@ public sealed class CompareTab : TabPage, IBusyTab
         var newPath = _newBox.Text.Trim();
         if (!Validate(oldPath, "변경 전") || !Validate(newPath, "변경 후")) return;
 
-        bool structured = _modeStruct.Checked;
-        bool ignoreWs   = _ignoreWsBox.Checked;
+        var mode = CurrentMode;
+        bool ignoreWs = _ignoreWsBox.Checked;
 
         _busy = true;
-        SetControlsEnabled(false);
-        _summary.Text = structured ? "구조 추출·비교 중… (워커 프로세스)" : "본문 추출·비교 중… (워커 프로세스)";
-        _textView.Clear();
+        _cancelRequested = false;
+        SetBusyUi(true);
+        _summary.Text = "추출·비교 중… (워커 프로세스 — [취소] 가능)";
+        _trackView.Clear();
         _structView.Clear();
+        _textView.Clear();
         _saveBtn.Enabled = false;
 
+        var worker = new HwpWorkerClient();
+        _activeWorker = worker;
         try
         {
-            var outcome = await Task.Run(() => ExtractAndCompare(oldPath, newPath, structured, ignoreWs));
+            var outcome = await Task.Run(() => ExtractAndCompare(worker, oldPath, newPath, mode, ignoreWs));
             ApplyOutcome(outcome);
         }
         catch (Exception ex)
         {
-            _summary.Text = "비교 실패.";
-            MessageBox.Show(this, ex.Message, "비교 실패", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            if (_cancelRequested)
+                _summary.Text = "비교 취소됨.";
+            else
+            {
+                _summary.Text = "비교 실패.";
+                MessageBox.Show(this, ex.Message, "비교 실패", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
         finally
         {
+            _activeWorker = null;
+            try { worker.Dispose(); } catch { }
             _busy = false;
-            SetControlsEnabled(true);
+            SetBusyUi(false);
         }
+    }
+
+    private void CancelCompare()
+    {
+        if (!_busy) return;
+        _cancelRequested = true;
+        _summary.Text = "취소 중…";
+        try { _activeWorker?.Dispose(); } catch { }   // 블로킹 ReadLine 을 EOF 로 깨움
     }
 
     private void ApplyOutcome(CompareOutcome o)
     {
-        if (o.Structured)
+        switch (o.Mode)
         {
-            _oldStruct = o.OldStruct; _newStruct = o.NewStruct; _lastStructDiff = o.StructDiff;
-            _oldText = _newText = null; _lastTextDiff = null;
+            case Mode.Track:
+                _oldStruct = o.OldStruct; _newStruct = o.NewStruct;
+                _oldText = o.OldText; _newText = o.NewText;
+                _lastUnified = o.Unified;
+                _lastStructDiff = null; _lastTextDiff = null;
 
-            _structView.Visible = true; _textView.Visible = false;
-            _structView.Render(o.StructDiff!);
-            _summary.Text = FormatStructSummary(o.StructDiff!.Summary);
-            _saveBtn.Enabled = o.StructDiff.Summary.HasChanges;
-        }
-        else
-        {
-            _oldText = o.OldText; _newText = o.NewText; _lastTextDiff = o.TextDiff;
-            _oldStruct = _newStruct = null; _lastStructDiff = null;
+                _trackView.Visible = true; _structView.Visible = false; _textView.Visible = false;
+                _trackView.Render(o.Unified!);
+                _summary.Text = Note(o.Note) + FormatUnifiedSummary(o.Unified!, _trackView.WasCapped);
+                _saveBtn.Enabled = o.Unified!.Summary.HasChanges;
+                break;
 
-            _textView.Visible = true; _structView.Visible = false;
-            _textView.Render(o.TextDiff!, _changedOnlyBox.Checked);
-            var note = o.Note is null ? "" : "⚠ " + o.Note + "      ";
-            _summary.Text = note + FormatTextSummary(o.TextDiff!.Summary);
-            _saveBtn.Enabled = o.TextDiff.Summary.HasChanges;
+            case Mode.Struct:
+                _oldStruct = o.OldStruct; _newStruct = o.NewStruct; _lastStructDiff = o.StructDiff;
+                _oldText = _newText = null; _lastTextDiff = null; _lastUnified = null;
+
+                _structView.Visible = true; _trackView.Visible = false; _textView.Visible = false;
+                _structView.Render(o.StructDiff!);
+                _summary.Text = Note(o.Note) + FormatStructSummary(o.StructDiff!.Summary);
+                _saveBtn.Enabled = o.StructDiff.Summary.HasChanges;
+                break;
+
+            default: // Text
+                _oldText = o.OldText; _newText = o.NewText; _lastTextDiff = o.TextDiff;
+                _oldStruct = _newStruct = null; _lastStructDiff = null; _lastUnified = null;
+
+                _textView.Visible = true; _trackView.Visible = false; _structView.Visible = false;
+                _textView.Render(o.TextDiff!, _changedOnlyBox.Checked);
+                _summary.Text = Note(o.Note) + FormatTextSummary(o.TextDiff!.Summary);
+                _saveBtn.Enabled = o.TextDiff.Summary.HasChanges;
+                break;
         }
     }
 
-    // ── 추출 + 비교 (백그라운드 스레드) ─────────────────────────────────
-    private CompareOutcome ExtractAndCompare(string oldPath, string newPath, bool structured, bool ignoreWs)
-    {
-        using var worker = new HwpWorkerClient();
+    private static string Note(string? note) => note is null ? "" : "⚠ " + note + "      ";
 
-        if (structured)
+    // ── 추출 + 비교 (백그라운드 스레드) ─────────────────────────────────
+    private CompareOutcome ExtractAndCompare(HwpWorkerClient worker, string oldPath, string newPath, Mode mode, bool ignoreWs)
+    {
+        if (mode == Mode.Text)
         {
-            try
-            {
-                var os = worker.ExtractStructure(oldPath);
-                var ns = worker.ExtractStructure(newPath);
-                var sd = _structComparer.Compare(os, ns, ignoreWs);
-                return CompareOutcome.Struct(os, ns, sd);
-            }
-            catch (Exception ex)
-            {
-                // 정규화/구조 추출 실패 → 같은 워커로 평문 추출 폴백.
-                var ot = worker.Extract(oldPath);
-                var nt = worker.Extract(newPath);
-                var td = _comparer.CompareText(ot, nt, ignoreWs);
-                return CompareOutcome.Text(ot, nt, td, $"구조 추출 실패 → 평문 비교로 대체 ({Trim(ex.Message)})");
-            }
+            var ot0 = worker.Extract(oldPath);
+            var nt0 = worker.Extract(newPath);
+            return CompareOutcome.Text(ot0, nt0, _comparer.CompareText(ot0, nt0, ignoreWs), null);
         }
 
-        var o = worker.Extract(oldPath);
-        var n = worker.Extract(newPath);
-        return CompareOutcome.Text(o, n, _comparer.CompareText(o, n, ignoreWs), null);
+        // Track / Struct — 구조 추출 시도, 실패 시 평문 폴백.
+        try
+        {
+            var os = worker.ExtractStructure(oldPath);
+            var ns = worker.ExtractStructure(newPath);
+            if (mode == Mode.Track)
+                return CompareOutcome.Track(os, ns, null, null, _structComparer.CompareUnified(os, ns, ignoreWs), null);
+            return CompareOutcome.Struct(os, ns, _structComparer.Compare(os, ns, ignoreWs), null);
+        }
+        catch (Exception ex) when (!_cancelRequested)
+        {
+            var ot = worker.Extract(oldPath);
+            var nt = worker.Extract(newPath);
+            var why = $"구조 추출 실패 → 평문 비교로 대체 ({Trim(ex.Message)})";
+            if (mode == Mode.Track)
+                return CompareOutcome.Track(null, null, ot, nt, _comparer.CompareUnifiedText(ot, nt, ignoreWs), why);
+            return CompareOutcome.Text(ot, nt, _comparer.CompareText(ot, nt, ignoreWs), why);
+        }
     }
 
     private static string Trim(string s) => s.Length <= 120 ? s : s[..120] + "…";
@@ -274,24 +330,67 @@ public sealed class CompareTab : TabPage, IBusyTab
 
     private void ReDiff()
     {
-        if (_modeStruct.Checked)
+        // 공백 무시 토글 — 캐시된 추출 결과로 재비교만(재추출 없음).
+        switch (CurrentMode)
         {
-            if (_oldStruct is null || _newStruct is null) return;
-            var sd = _structComparer.Compare(_oldStruct, _newStruct, _ignoreWsBox.Checked);
-            _lastStructDiff = sd;
-            _structView.Render(sd);
-            _summary.Text = FormatStructSummary(sd.Summary);
-            _saveBtn.Enabled = sd.Summary.HasChanges;
+            case Mode.Track:
+                if (_oldStruct is not null && _newStruct is not null)
+                {
+                    var ud = _structComparer.CompareUnified(_oldStruct, _newStruct, _ignoreWsBox.Checked);
+                    _lastUnified = ud; _trackView.Render(ud);
+                    _summary.Text = FormatUnifiedSummary(ud, _trackView.WasCapped);
+                    _saveBtn.Enabled = ud.Summary.HasChanges;
+                }
+                else if (_oldText is not null && _newText is not null)
+                {
+                    var ud = _comparer.CompareUnifiedText(_oldText, _newText, _ignoreWsBox.Checked);
+                    _lastUnified = ud; _trackView.Render(ud);
+                    _summary.Text = FormatUnifiedSummary(ud, _trackView.WasCapped);
+                    _saveBtn.Enabled = ud.Summary.HasChanges;
+                }
+                break;
+
+            case Mode.Struct:
+                if (_oldStruct is null || _newStruct is null) return;
+                var sd = _structComparer.Compare(_oldStruct, _newStruct, _ignoreWsBox.Checked);
+                _lastStructDiff = sd; _structView.Render(sd);
+                _summary.Text = FormatStructSummary(sd.Summary);
+                _saveBtn.Enabled = sd.Summary.HasChanges;
+                break;
+
+            default:
+                if (_oldText is null || _newText is null) return;
+                var td = _comparer.CompareText(_oldText, _newText, _ignoreWsBox.Checked);
+                _lastTextDiff = td; _textView.Render(td, _changedOnlyBox.Checked);
+                _summary.Text = FormatTextSummary(td.Summary);
+                _saveBtn.Enabled = td.Summary.HasChanges;
+                break;
         }
-        else
-        {
-            if (_oldText is null || _newText is null) return;
-            var td = _comparer.CompareText(_oldText, _newText, _ignoreWsBox.Checked);
-            _lastTextDiff = td;
-            _textView.Render(td, _changedOnlyBox.Checked);
-            _summary.Text = FormatTextSummary(td.Summary);
-            _saveBtn.Enabled = td.Summary.HasChanges;
-        }
+    }
+
+    // ── 요약 문구 ───────────────────────────────────────────────────────
+
+    private static string Pages(int? oldP, int? newP)
+    {
+        if (oldP is null && newP is null) return "";
+        string a = oldP?.ToString() ?? "?", b = newP?.ToString() ?? "?";
+        return a == b ? $"{a}쪽   ·   " : $"{a} → {b}쪽   ·   ";
+    }
+
+    private static string FormatUnifiedSummary(UnifiedDiff d, bool capped)
+    {
+        var s = d.Summary;
+        if (!s.HasChanges)
+            return Pages(d.OldPages, d.NewPages) + "차이 없음 — 두 문서가 동일합니다.";
+
+        int total = s.Inserted + s.Deleted + s.Modified + s.Unchanged;
+        double ratio = total == 0 ? 0 : (double)(s.Inserted + s.Deleted + s.Modified) / total;
+        string warn = ratio >= UnrelatedRatio
+            ? $"⚠ 변경 {ratio * 100:0}% — 다른 문서일 수 있습니다.   "
+            : "";
+        string cap = capped ? "   (변경 과다 — 일부만 색 표시, 전체는 결과 저장)" : "";
+        return warn + Pages(d.OldPages, d.NewPages)
+            + $"변경 {s.ChangedLines:N0}건   —   추가 {s.Inserted:N0} · 삭제 {s.Deleted:N0} · 수정 {s.Modified:N0}" + cap;
     }
 
     private static string FormatStructSummary(DiffSummary s)
@@ -308,7 +407,8 @@ public sealed class CompareTab : TabPage, IBusyTab
     private async Task SaveResultAsync()
     {
         if (_busy) return;
-        bool hasResult = (_modeStruct.Checked && _lastStructDiff is not null)
+        bool hasResult = (_modeTrack.Checked  && _lastUnified    is not null)
+                      || (_modeStruct.Checked && _lastStructDiff is not null)
                       || (_modeText.Checked   && _lastTextDiff   is not null);
         if (!hasResult) return;
 
@@ -323,15 +423,17 @@ public sealed class CompareTab : TabPage, IBusyTab
 
         var path = dlg.FileName;
         var ext = Path.GetExtension(path).ToLowerInvariant();
+        var oldP = _oldBox.Text.Trim();
+        var newP = _newBox.Text.Trim();
 
         // TXT — 인-프로세스로 즉시 저장.
         if (ext == ".txt")
         {
             try
             {
-                var content = _modeStruct.Checked
-                    ? BuildStructReport(_lastStructDiff!)
-                    : BuildUnifiedText(_lastTextDiff!);
+                var content = _modeTrack.Checked  ? BuildUnifiedText(_lastUnified!)
+                            : _modeStruct.Checked ? BuildStructReport(_lastStructDiff!)
+                            :                        BuildSideBySideText(_lastTextDiff!);
                 File.WriteAllText(path, content, new UTF8Encoding(true));
                 PromptOpen(path);
             }
@@ -339,16 +441,16 @@ public sealed class CompareTab : TabPage, IBusyTab
             return;
         }
 
-        // HWP/HWPX — 워커 COM 으로 색상 입힌 리포트 문서 생성.
+        // HWP/HWPX — 워커 COM 으로 색상/취소선/밑줄 입힌 리포트 문서 생성.
         var format = ext == ".hwpx" ? "HWPX" : "HWP";
-        var oldP = _oldBox.Text.Trim();
-        var newP = _newBox.Text.Trim();
-        var doc = _modeStruct.Checked
-            ? ReportBuilder.FromStructure(_lastStructDiff!, oldP, newP, FormatStructSummary(_lastStructDiff!.Summary))
-            : ReportBuilder.FromText(_lastTextDiff!, oldP, newP, FormatTextSummary(_lastTextDiff!.Summary));
+        var doc = _modeTrack.Checked
+            ? ReportBuilder.FromUnified(_lastUnified!, oldP, newP, FormatUnifiedSummary(_lastUnified!, false))
+            : _modeStruct.Checked
+                ? ReportBuilder.FromStructure(_lastStructDiff!, oldP, newP, FormatStructSummary(_lastStructDiff!.Summary))
+                : ReportBuilder.FromText(_lastTextDiff!, oldP, newP, FormatTextSummary(_lastTextDiff!.Summary));
 
         _busy = true;
-        SetControlsEnabled(false);
+        SetBusyUi(true);
         _saveBtn.Enabled = false;
         var prev = _summary.Text;
         _summary.Text = "한/글 리포트 생성 중… (COM)";
@@ -373,7 +475,7 @@ public sealed class CompareTab : TabPage, IBusyTab
         finally
         {
             _busy = false;
-            SetControlsEnabled(true);
+            SetBusyUi(false);
             _saveBtn.Enabled = true;
         }
     }
@@ -406,6 +508,44 @@ public sealed class CompareTab : TabPage, IBusyTab
         sb.AppendLine($"#   {summary}");
         sb.AppendLine(new string('=', 70));
         return sb.ToString();
+    }
+
+    // 변경추적 통합본 → 평문(취소선 불가라 마커로): 동일=그대로, 삭제=[-..-], 추가={+..+}
+    private string BuildUnifiedText(UnifiedDiff diff)
+    {
+        var sb = new StringBuilder(Header(FormatUnifiedSummary(diff, false)));
+        sb.AppendLine("#   기호:  [-삭제-]   {+추가+}");
+        sb.AppendLine();
+        foreach (var it in diff.Items)
+        {
+            if (it.Kind == UnifiedItemKind.Paragraph)
+            {
+                foreach (var r in it.Runs)
+                    sb.Append(r.Kind switch
+                    {
+                        DiffChangeKind.Deleted  => $"[-{r.Text}-]",
+                        DiffChangeKind.Inserted => $"{{+{r.Text}+}}",
+                        _                       => r.Text,
+                    });
+                sb.AppendLine();
+            }
+            else
+            {
+                sb.AppendLine(it.LineKind switch
+                {
+                    DiffChangeKind.Inserted => $"［표 추가 {it.NewDims}］",
+                    DiffChangeKind.Deleted  => $"［표 삭제 {it.OldDims}］",
+                    DiffChangeKind.Modified => $"［표 변경 {it.OldDims} → {it.NewDims}］",
+                    _                       => $"［표 {it.OldDims}］",
+                });
+                if (it.Cells is { Count: > 0 })
+                    foreach (var c in it.Cells)
+                        sb.AppendLine($"    [{c.Row + 1}행 {c.Col + 1}열]  [-{CellTxt(c.Old)}-]  →  {{+{CellTxt(c.New)}+}}");
+            }
+        }
+        return sb.ToString();
+
+        static string CellTxt(string s) => s.Length == 0 ? "(빈칸)" : s.Replace("\n", " ");
     }
 
     private string BuildStructReport(StructureDiff diff)
@@ -444,7 +584,7 @@ public sealed class CompareTab : TabPage, IBusyTab
         static string Cell(string s) => s.Length == 0 ? "(빈칸)" : s.Replace("\n", " ");
     }
 
-    private string BuildUnifiedText(SideBySideDiff diff)
+    private string BuildSideBySideText(SideBySideDiff diff)
     {
         var sb = new StringBuilder(Header(FormatTextSummary(diff.Summary)));
         sb.AppendLine("#   기호:  -삭제   +추가   ~수정(전/후)   (공백)동일");
@@ -468,31 +608,36 @@ public sealed class CompareTab : TabPage, IBusyTab
         return sb.ToString();
     }
 
-    private void SetControlsEnabled(bool on)
+    private void SetBusyUi(bool busy)
     {
-        _compareBtn.Enabled = on;
-        _compareBtn.Text = on ? "비교" : "비교 중…";
-        _swapBtn.Enabled = on;
-        _oldBox.Enabled = on;
-        _newBox.Enabled = on;
-        _modeStruct.Enabled = on;
-        _modeText.Enabled = on;
+        // 비교 중에는 [비교] 가 [취소] 로 바뀐다(버튼 자체는 계속 활성).
+        _compareBtn.Text = busy ? "취소" : "비교";
+        _swapBtn.Enabled = !busy;
+        _oldBox.Enabled = !busy;
+        _newBox.Enabled = !busy;
+        _modeTrack.Enabled = !busy;
+        _modeStruct.Enabled = !busy;
+        _modeText.Enabled = !busy;
     }
 
     // ─ IBusyTab ─────────────────────────────────────────────────────────
     public bool IsBusy => _busy;
-    public void RequestStop() { /* 비교는 짧고 워커가 Dispose 로 회수됨 */ }
+    public void RequestStop() { CancelCompare(); }
 
     // ─ 추출+비교 결과 ───────────────────────────────────────────────────
     private sealed record CompareOutcome(
-        bool Structured,
-        DocStructure? OldStruct, DocStructure? NewStruct, StructureDiff? StructDiff,
+        Mode Mode,
+        DocStructure? OldStruct, DocStructure? NewStruct,
+        StructureDiff? StructDiff,
         string? OldText, string? NewText, SideBySideDiff? TextDiff,
+        UnifiedDiff? Unified,
         string? Note)
     {
-        public static CompareOutcome Struct(DocStructure o, DocStructure n, StructureDiff d)
-            => new(true, o, n, d, null, null, null, null);
+        public static CompareOutcome Track(DocStructure? os, DocStructure? ns, string? ot, string? nt, UnifiedDiff u, string? note)
+            => new(Mode.Track, os, ns, null, ot, nt, null, u, note);
+        public static CompareOutcome Struct(DocStructure o, DocStructure n, StructureDiff d, string? note)
+            => new(Mode.Struct, o, n, d, null, null, null, null, note);
         public static CompareOutcome Text(string o, string n, SideBySideDiff d, string? note)
-            => new(false, null, null, null, o, n, d, note);
+            => new(Mode.Text, null, null, null, o, n, d, null, note);
     }
 }

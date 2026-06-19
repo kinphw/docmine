@@ -107,6 +107,112 @@ public sealed class DocumentStructureComparer
         return new StructureDiff(changes, new DiffSummary(inserted, deleted, modified, unchanged));
     }
 
+    // ── 변경추적 통합본 ───────────────────────────────────────────────────
+    // Compare 와 같은 블록 LCS 정렬을 쓰되, *미변경 블록까지 전부* 문서 순서대로 담아
+    // 화면에서 전체를 읽으며 변경점을 따라갈 수 있게 한다. 수정 문단은 문자 단위 인라인 병합.
+    public UnifiedDiff CompareUnified(DocStructure oldDoc, DocStructure newDoc, bool ignoreWhitespace = true)
+    {
+        var oldBlocks = oldDoc.Blocks;
+        var newBlocks = newDoc.Blocks;
+
+        var oldKeys = string.Join("\n", oldBlocks.Select(BlockKey));
+        var newKeys = string.Join("\n", newBlocks.Select(BlockKey));
+        var model = _builder.BuildDiffModel(oldKeys, newKeys, ignoreWhitespace);
+
+        var oldLines = model.OldText.Lines;
+        var newLines = model.NewText.Lines;
+        int rowCount = Math.Max(oldLines.Count, newLines.Count);
+
+        var items = new List<UnifiedItem>();
+        int oi = 0, ni = 0;
+        string heading = "";
+        int inserted = 0, deleted = 0, modified = 0, unchanged = 0;
+
+        for (int r = 0; r < rowCount; r++)
+        {
+            var oType = r < oldLines.Count ? oldLines[r].Type : ChangeType.Imaginary;
+            var nType = r < newLines.Count ? newLines[r].Type : ChangeType.Imaginary;
+
+            bool hasOld = oType != ChangeType.Imaginary && oi < oldBlocks.Count;
+            bool hasNew = nType != ChangeType.Imaginary && ni < newBlocks.Count;
+
+            DocBlock? ob = hasOld ? oldBlocks[oi] : null;
+            DocBlock? nb = hasNew ? newBlocks[ni] : null;
+
+            if (hasOld && hasNew)
+            {
+                if (oType == ChangeType.Unchanged && nType == ChangeType.Unchanged)
+                {
+                    items.Add(UnchangedItem(nb!, heading));
+                    unchanged++;
+                }
+                else if (ob!.IsParagraph && nb!.IsParagraph)
+                {
+                    items.Add(ParaModItem(ob, nb, heading, ignoreWhitespace));
+                    modified++;
+                }
+                else if (ob!.IsTable && nb!.IsTable)
+                {
+                    items.Add(TableModItem(ob, nb, heading));
+                    modified++;
+                }
+                else
+                {
+                    items.Add(SoloItem(ob!, DiffChangeKind.Deleted, heading));
+                    items.Add(SoloItem(nb!, DiffChangeKind.Inserted, heading));
+                    deleted++; inserted++;
+                }
+            }
+            else if (hasOld) { items.Add(SoloItem(ob!, DiffChangeKind.Deleted, heading)); deleted++; }
+            else if (hasNew) { items.Add(SoloItem(nb!, DiffChangeKind.Inserted, heading)); inserted++; }
+
+            if (ob is not null && IsHeading(ob)) heading = Shorten(ob.Text);
+            if (nb is not null && IsHeading(nb)) heading = Shorten(nb.Text);
+
+            if (hasOld) oi++;
+            if (hasNew) ni++;
+        }
+
+        int? oldPages = oldDoc.Pages > 0 ? oldDoc.Pages : null;
+        int? newPages = newDoc.Pages > 0 ? newDoc.Pages : null;
+        return new UnifiedDiff(items, new DiffSummary(inserted, deleted, modified, unchanged), oldPages, newPages);
+    }
+
+    private UnifiedItem UnchangedItem(DocBlock b, string heading)
+    {
+        if (b.IsTable)
+            return new UnifiedItem(UnifiedItemKind.Table, DiffChangeKind.Unchanged,
+                Array.Empty<InlineRun>(), heading, null, Dims(b.Rows ?? new()), Dims(b.Rows ?? new()));
+        return new UnifiedItem(UnifiedItemKind.Paragraph, DiffChangeKind.Unchanged,
+            new[] { new InlineRun(Flatten(b.Text), DiffChangeKind.Unchanged) }, heading, null, null, null);
+    }
+
+    private UnifiedItem ParaModItem(DocBlock ob, DocBlock nb, string heading, bool ignoreWs)
+    {
+        var runs = _inline.InlineMerge(Flatten(ob.Text), Flatten(nb.Text), ignoreWs);
+        return new UnifiedItem(UnifiedItemKind.Paragraph, DiffChangeKind.Modified, runs, heading, null, null, null);
+    }
+
+    private static UnifiedItem TableModItem(DocBlock ob, DocBlock nb, string heading)
+    {
+        var oldRows = ob.Rows ?? new();
+        var newRows = nb.Rows ?? new();
+        return new UnifiedItem(UnifiedItemKind.Table, DiffChangeKind.Modified,
+            Array.Empty<InlineRun>(), heading, CellDiffs(oldRows, newRows), Dims(oldRows), Dims(newRows));
+    }
+
+    // 추가/삭제된 블록 한 개(문단 또는 표 통째).
+    private static UnifiedItem SoloItem(DocBlock b, DiffChangeKind kind, string heading)
+    {
+        if (b.IsTable)
+            return new UnifiedItem(UnifiedItemKind.Table, kind,
+                Array.Empty<InlineRun>(), heading, null,
+                kind == DiffChangeKind.Deleted ? Dims(b.Rows ?? new()) : null,
+                kind == DiffChangeKind.Inserted ? Dims(b.Rows ?? new()) : null);
+        return new UnifiedItem(UnifiedItemKind.Paragraph, kind,
+            new[] { new InlineRun(Flatten(b.Text), kind) }, heading, null, null, null);
+    }
+
     // ─ 변경 항목 생성 ───────────────────────────────────────────────────
 
     private StructChange MakeParagraphMod(DocBlock ob, DocBlock nb, string loc, bool ignoreWs)
@@ -129,9 +235,15 @@ public sealed class DocumentStructureComparer
     {
         var oldRows = ob.Rows ?? new();
         var newRows = nb.Rows ?? new();
+        return new StructChange(StructChangeKind.ModifiedTable, loc,
+            null, null, null, null, CellDiffs(oldRows, newRows), Dims(oldRows), Dims(newRows));
+    }
+
+    // 표 두 개의 셀 격자를 비교해 바뀐 셀만 추려낸다 (행/열 기준 정렬, 공백 정규화).
+    private static List<CellChange> CellDiffs(List<List<string>> oldRows, List<List<string>> newRows)
+    {
         int rows = Math.Max(oldRows.Count, newRows.Count);
         var cells = new List<CellChange>();
-
         for (int r = 0; r < rows; r++)
         {
             var oRow = r < oldRows.Count ? oldRows[r] : new List<string>();
@@ -145,9 +257,7 @@ public sealed class DocumentStructureComparer
                     cells.Add(new CellChange(r, c, o, n));
             }
         }
-
-        return new StructChange(StructChangeKind.ModifiedTable, loc,
-            null, null, null, null, cells, Dims(oldRows), Dims(newRows));
+        return cells;
     }
 
     private static StructChange MakeInsert(DocBlock b, string loc)

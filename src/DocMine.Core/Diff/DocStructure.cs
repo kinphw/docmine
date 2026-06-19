@@ -14,6 +14,9 @@ public sealed class DocStructure
 {
     public List<DocBlock> Blocks { get; set; } = new();
 
+    /// <summary>COM 으로 연 경우의 페이지 수(렌더 결과). ZIP 직접 파싱 경로면 0(미상).</summary>
+    public int Pages { get; set; }
+
     /// <summary>
     /// HwpxDocument 를 평탄화. 공백뿐인 문단은 노이즈라 제외(텍스트 추출의 skipEmpty 와 같은 취지).
     /// 표는 항상 보존. 섹션 경계는 비교에 불필요해 무시하고 문서 순서대로 이어 붙인다.
