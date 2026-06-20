@@ -25,7 +25,7 @@ public sealed class EnvCompareList : UserControl
     public readonly record struct ColumnDef(string Header, int Width, HorizontalAlignment Align);
 
     private readonly ListView _list;
-    private readonly ComboBox _filter;
+    private readonly RadioButton _fAll, _fOnlyBase, _fBoth, _fOnlyCompare;
     private readonly Button _selAll, _selNone;
     private readonly Label _selInfo, _hint;
 
@@ -46,10 +46,16 @@ public sealed class EnvCompareList : UserControl
     {
         var bar = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false, Padding = new Padding(0, 0, 0, 4) };
         bar.Controls.Add(new Label { Text = "표시:", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
-        _filter = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150, Enabled = false };
-        _filter.SelectedIndexChanged += (_, _) => ApplyFilter();
-        bar.Controls.Add(_filter);
-        _selAll  = new Button { Text = "전체 선택", AutoSize = true, Enabled = false, Margin = new Padding(12, 0, 0, 0) };
+        _fAll        = new RadioButton { Text = "전체", AutoSize = true, Checked = true, Enabled = false, Margin = new Padding(0, 4, 0, 0) };
+        _fOnlyBase   = new RadioButton { AutoSize = true, Enabled = false, Margin = new Padding(8, 4, 0, 0) };  // {compare}에 없는 것만
+        _fBoth       = new RadioButton { Text = "양쪽 모두", AutoSize = true, Enabled = false, Margin = new Padding(8, 4, 0, 0) };
+        _fOnlyCompare = new RadioButton { AutoSize = true, Enabled = false, Margin = new Padding(8, 4, 0, 0) }; // {base}에 없는 것만
+        foreach (var rb in new[] { _fAll, _fOnlyBase, _fBoth, _fOnlyCompare })
+        {
+            rb.CheckedChanged += (s, _) => { if (((RadioButton)s!).Checked) ApplyFilter(); };
+            bar.Controls.Add(rb);
+        }
+        _selAll  = new Button { Text = "전체 선택", AutoSize = true, Enabled = false, Margin = new Padding(16, 0, 0, 0) };
         _selNone = new Button { Text = "전체 해제", AutoSize = true, Enabled = false, Margin = new Padding(4, 0, 0, 0) };
         _selAll.Click  += (_, _) => SetAllChecked(true);
         _selNone.Click += (_, _) => SetAllChecked(false);
@@ -87,9 +93,9 @@ public sealed class EnvCompareList : UserControl
         foreach (var c in dataColumns)
             _list.Columns.Add(c.Header, c.Width, c.Align);
 
-        _filter.Items.Clear();
-        _filter.Items.AddRange(new object[] { "전체", $"{baseLabel}만", "양쪽 모두", $"{compareLabel}만" });
-        _filter.SelectedIndex = 0;
+        // "없는 것" 관점 라벨 — 매니페스트(=compare)에 없는 것 / 현재환경(=base)에 없는 것.
+        _fOnlyBase.Text    = $"{compareLabel}에 없는 것만";   // InBase && !InCompare
+        _fOnlyCompare.Text = $"{baseLabel}에 없는 것만";      // !InBase && InCompare (유령)
     }
 
     /// <summary>행 공급 + 대조 로드 여부. 호출 시 선택/필터 초기화.</summary>
@@ -99,8 +105,8 @@ public sealed class EnvCompareList : UserControl
         _all.AddRange(rows);
         _compareLoaded = compareLoaded;
         _compareCol.Width = compareLoaded ? 64 : 0;
-        _filter.Enabled = compareLoaded;
-        if (!compareLoaded && _filter.Items.Count > 0) _filter.SelectedIndex = 0;
+        foreach (var rb in new[] { _fAll, _fOnlyBase, _fBoth, _fOnlyCompare }) rb.Enabled = compareLoaded;
+        if (!compareLoaded) _fAll.Checked = true;   // 대조 미로드 → 항상 전체
         _checked.Clear();
         _anchor = -1;
         ApplyFilter();
@@ -115,10 +121,11 @@ public sealed class EnvCompareList : UserControl
     private void ApplyFilter()
     {
         _view.Clear();
-        var f = _filter.SelectedIndex;   // 0 전체 / 1 base만 / 2 양쪽 / 3 compare만
+        // 0 전체 / 1 compare에 없는것(InBase&&!InCompare) / 2 양쪽 / 3 base에 없는것(유령)
+        int f = _fAll.Checked ? 0 : _fOnlyBase.Checked ? 1 : _fBoth.Checked ? 2 : 3;
         foreach (var r in _all)
         {
-            bool show = !_compareLoaded || f <= 0 || f switch
+            bool show = !_compareLoaded || f == 0 || f switch
             {
                 1 => r.InBase && !r.InCompare,
                 2 => r.InBase && r.InCompare,
