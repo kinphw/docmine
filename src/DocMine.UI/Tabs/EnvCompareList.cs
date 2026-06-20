@@ -48,7 +48,7 @@ public sealed class EnvCompareList : UserControl
         bar.Controls.Add(new Label { Text = "표시:", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
         _fAll        = new RadioButton { Text = "전체", AutoSize = true, Checked = true, Enabled = false, Margin = new Padding(0, 4, 0, 0) };
         _fOnlyBase   = new RadioButton { AutoSize = true, Enabled = false, Margin = new Padding(8, 4, 0, 0) };  // {compare}에 없는 것만
-        _fBoth       = new RadioButton { Text = "양쪽 모두", AutoSize = true, Enabled = false, Margin = new Padding(8, 4, 0, 0) };
+        _fBoth       = new RadioButton { Text = "양쪽에 있는 것만", AutoSize = true, Enabled = false, Margin = new Padding(8, 4, 0, 0) };
         _fOnlyCompare = new RadioButton { AutoSize = true, Enabled = false, Margin = new Padding(8, 4, 0, 0) }; // {base}에 없는 것만
         foreach (var rb in new[] { _fAll, _fOnlyBase, _fBoth, _fOnlyCompare })
         {
