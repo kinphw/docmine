@@ -297,6 +297,18 @@ ON DUPLICATE KEY UPDATE
         return (inserted, updated);
     }
 
+    /// <summary>현재 DB 전체의 (directory, filename) 원본 쌍 — 반입 대조(현재환경) 용.</summary>
+    public List<(string Dir, string Fn)> LoadAllKeys()
+    {
+        var list = new List<(string, string)>();
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT directory, filename FROM `{_cfg.DbTable}`";
+        using var rdr = cmd.ExecuteReader();
+        while (rdr.Read()) list.Add((rdr.GetString(0), rdr.GetString(1)));
+        return list;
+    }
+
     /// <summary>레코드 자체를 DB 에서 완전히 삭제.</summary>
     public int DeleteRows(IReadOnlyCollection<int> ids)
     {
