@@ -53,6 +53,7 @@ public sealed class MainForm : Form
         var extractor = new ExtractorTab();
         var compare   = new CompareTab();
         var dbExport  = new DbExportTab();
+        var import    = new ImportTab();
         _settingsTab  = new SettingsTab();
 
         // ── ① Fill: 콘텐츠 호스트 ─────────────────────────────────────
@@ -66,7 +67,7 @@ public sealed class MainForm : Form
             SizeMode = TabSizeMode.Fixed,
             ItemSize = new Size(0, 1),
         };
-        foreach (var c in new TabPage[] { scan, insert, search, extractor, compare, dbExport, _settingsTab })
+        foreach (var c in new TabPage[] { scan, insert, search, extractor, compare, dbExport, import, _settingsTab })
         {
             _host.TabPages.Add(c);
             _contents.Add(c);
@@ -84,7 +85,7 @@ public sealed class MainForm : Form
             Padding = new Padding(0, 6, 0, 6),
             AutoScroll = true,
         };
-        AddNavGroup(nav, "파이프라인", ("스캔", scan), ("적재", insert), ("반출", dbExport));
+        AddNavGroup(nav, "파이프라인", ("스캔", scan), ("적재", insert), ("반출", dbExport), ("반입", import));
         AddNavGroup(nav, "조회", ("검색", search));
         AddNavGroup(nav, "도구", ("문서 추출", extractor), ("문서 비교", compare));
         AddNavGroup(nav, "설정", ("DB 설정", _settingsTab));

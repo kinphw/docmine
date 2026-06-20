@@ -14,6 +14,21 @@ using DocMine.Core.Pipeline;
 
 namespace DocMine.Core.Db;
 
+/// <summary>
+/// 환경 간 이전(반출/반입) 단위 — body_text 까지 포함한 완전한 레코드.
+/// id 는 환경마다 다르므로 전송 대상이 아니다(대상 환경이 자기 id 부여). 키는 (Directory,Filename).
+/// </summary>
+public sealed record DocRecord(
+    string  Directory,
+    string  Filename,
+    string  Extension,
+    long    FileSize,
+    string? FileMtime,
+    string? BodyText,
+    string  ParseStatus,
+    string? ErrorMsg,
+    DateTime? ParsedAt);
+
 public sealed class DocumentRepository
 {
     private readonly AppConfig _cfg;
@@ -175,6 +190,111 @@ CREATE TABLE IF NOT EXISTS `{_cfg.DbTable}` (
             n++;
         }
         return n;
+    }
+
+    private static readonly HashSet<string> ValidStatus =
+        new(StringComparer.OrdinalIgnoreCase) { "success", "error", "skip", "empty" };
+
+    /// <summary>
+    /// 선택된 id 들의 완전한 레코드(body_text 포함)를 조회 — 반출(전송 payload) 용.
+    /// 목록 쿼리는 메타만 가볍게 두고, 본문은 반출 시 선택분만 여기서 끌어온다.
+    /// </summary>
+    public List<DocRecord> LoadRecordsByIds(IReadOnlyCollection<int> ids)
+    {
+        var result = new List<DocRecord>(ids.Count);
+        if (ids.Count == 0) return result;
+
+        var idList = ids.ToList();
+        const int chunkSize = 500;
+        using var conn = OpenConnection();
+        for (var i = 0; i < idList.Count; i += chunkSize)
+        {
+            var chunk = idList.Skip(i).Take(chunkSize).ToList();
+            var placeholders = string.Join(", ", chunk.Select((_, j) => $"@id{j}"));
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                $"SELECT directory, filename, extension, file_size, file_mtime, " +
+                $"body_text, parse_status, error_msg, parsed_at " +
+                $"FROM `{_cfg.DbTable}` WHERE id IN ({placeholders})";
+            for (var j = 0; j < chunk.Count; j++)
+                cmd.Parameters.AddWithValue($"@id{j}", chunk[j]);
+
+            using var rdr = cmd.ExecuteReader();
+            while (rdr.Read())
+            {
+                result.Add(new DocRecord(
+                    Directory:   rdr.GetString(0),
+                    Filename:    rdr.GetString(1),
+                    Extension:   rdr.IsDBNull(2) ? "" : rdr.GetString(2),
+                    FileSize:    rdr.IsDBNull(3) ? 0  : rdr.GetInt64(3),
+                    FileMtime:   rdr.IsDBNull(4) ? null : rdr.GetString(4),
+                    BodyText:    rdr.IsDBNull(5) ? null : rdr.GetString(5),
+                    ParseStatus: rdr.IsDBNull(6) ? "success" : rdr.GetString(6),
+                    ErrorMsg:    rdr.IsDBNull(7) ? null : rdr.GetString(7),
+                    ParsedAt:    rdr.IsDBNull(8) ? null : rdr.GetDateTime(8)));
+            }
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// 레코드(body_text 포함)를 (directory,filename) UNIQUE 키 기준으로 upsert — 반입.
+    /// 재파싱 없이 다른 환경의 파싱 결과를 그대로 적재. 멱등(같은 CSV 재반입해도 안전).
+    /// 반환: (신규 삽입 수, 기존 갱신 수).
+    /// </summary>
+    public (int Inserted, int Updated) UpsertRecords(
+        IReadOnlyList<DocRecord> records,
+        Action<int, int>? onProgress = null,
+        CancellationToken ct = default)
+    {
+        int inserted = 0, updated = 0;
+        if (records.Count == 0) return (0, 0);
+
+        using var conn = OpenConnection();
+        using var tx = conn.BeginTransaction();
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $@"
+INSERT INTO `{_cfg.DbTable}`
+    (directory, filename, extension, file_size, file_mtime, body_text, parse_status, error_msg, parsed_at)
+VALUES (@d, @fn, @ext, @sz, @mt, @body, @status, @err, @pa)
+ON DUPLICATE KEY UPDATE
+    extension=VALUES(extension), file_size=VALUES(file_size), file_mtime=VALUES(file_mtime),
+    body_text=VALUES(body_text), parse_status=VALUES(parse_status),
+    error_msg=VALUES(error_msg), parsed_at=VALUES(parsed_at)";
+        var pD   = cmd.Parameters.Add("@d",      MySqlDbType.VarChar);
+        var pFn  = cmd.Parameters.Add("@fn",     MySqlDbType.VarChar);
+        var pExt = cmd.Parameters.Add("@ext",    MySqlDbType.VarChar);
+        var pSz  = cmd.Parameters.Add("@sz",     MySqlDbType.Int64);
+        var pMt  = cmd.Parameters.Add("@mt",     MySqlDbType.VarChar);
+        var pBody= cmd.Parameters.Add("@body",   MySqlDbType.LongText);
+        var pSt  = cmd.Parameters.Add("@status", MySqlDbType.VarChar);
+        var pErr = cmd.Parameters.Add("@err",    MySqlDbType.VarChar);
+        var pPa  = cmd.Parameters.Add("@pa",     MySqlDbType.DateTime);
+
+        for (var i = 0; i < records.Count; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var r = records[i];
+            // 키는 DB 적재본과 동일하게 NFC 정규화(스캔/추출 경로와 일관 — [[CsvIngestHelpers]]).
+            pD.Value    = r.Directory.Normalize(NormalizationForm.FormC);
+            pFn.Value   = r.Filename.Normalize(NormalizationForm.FormC);
+            pExt.Value  = r.Extension ?? "";
+            pSz.Value   = r.FileSize;
+            pMt.Value   = (object?)r.FileMtime ?? DBNull.Value;
+            pBody.Value = (object?)r.BodyText ?? DBNull.Value;
+            pSt.Value   = ValidStatus.Contains(r.ParseStatus) ? r.ParseStatus.ToLowerInvariant() : "success";
+            pErr.Value  = (object?)r.ErrorMsg ?? DBNull.Value;
+            pPa.Value   = (object?)r.ParsedAt ?? DBNull.Value;
+
+            var affected = cmd.ExecuteNonQuery();
+            if (affected == 1) inserted++; else updated++;   // 1=삽입, 2=갱신, 0=동일(기존으로 셈)
+
+            if ((i & 0x3F) == 0) onProgress?.Invoke(i + 1, records.Count);
+        }
+        tx.Commit();
+        onProgress?.Invoke(records.Count, records.Count);
+        return (inserted, updated);
     }
 
     /// <summary>레코드 자체를 DB 에서 완전히 삭제.</summary>

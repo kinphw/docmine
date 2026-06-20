@@ -260,10 +260,10 @@ public sealed class DbExportTab : TabPage
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
         };
         // 반출 주 흐름 버튼만 — manifest 생성은 '2. 환경2 대조' 그룹으로 분리됨.
-        _exportBtn     = new Button { Text = "선택 항목 반출 (CSV)", AutoSize = true, Enabled = false };
+        _exportBtn     = new Button { Text = "선택 항목 반출 (본문 포함)", AutoSize = true, Enabled = false };
         _selectNoneBtn = new Button { Text = "전체 해제", AutoSize = true, Enabled = false };
         _selectAllBtn  = new Button { Text = "전체 선택", AutoSize = true, Enabled = false };
-        _exportBtn.Click     += (_, _) => ExportSelected();
+        _exportBtn.Click     += async (_, _) => await ExportSelectedAsync();
         _selectNoneBtn.Click += (_, _) => SetAllChecked(false);
         _selectAllBtn.Click  += (_, _) => SetAllChecked(true);
         // RightToLeft FlowDirection — Add 순서 역순으로 화면에 배치.
@@ -587,34 +587,53 @@ public sealed class DbExportTab : TabPage
         _exportBtn.Enabled = n > 0;
     }
 
-    private void ExportSelected()
+    // 선택 행을 본문(body_text) 포함 전송 CSV 로 반출 — 환경2 에서 '반입' 으로 재파싱 없이 적재.
+    // 목록은 메타만 가볍게 들고 있으므로, 본문은 여기서 선택 id 만 DB 에서 끌어온다(백그라운드).
+    private async Task ExportSelectedAsync()
     {
-        var rows = _viewRows.Where(r => _checkedIds.Contains(r.Id)).ToList();
-        if (rows.Count == 0)
+        var ids = _viewRows.Where(r => _checkedIds.Contains(r.Id)).Select(r => r.Id).ToList();
+        if (ids.Count == 0)
         {
-            MessageBox.Show(this, "추출할 행을 하나 이상 선택하세요.", "선택 없음");
+            MessageBox.Show(this, "반출할 행을 하나 이상 선택하세요.", "선택 없음");
             return;
         }
 
         using var dlg = new SaveFileDialog
         {
-            Title = "DB 추출 결과 CSV 저장",
+            Title = "반출 CSV 저장 (본문 포함 — 환경2 반입용)",
             FileName = $"db_export_{DateTime.Now:yyyyMMdd_HHmmss}.csv",
             DefaultExt = "csv",
             Filter = "CSV (*.csv)|*.csv|CSV (*.csd)|*.csd|모든 파일 (*.*)|*.*",
         };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        var path = dlg.FileName;
 
+        _exportBtn.Enabled = false;
+        _searchBtn.Enabled = false;
+        var prev = _statusLabel.Text;
+        _statusLabel.Text = "반출 중… (본문 조회)";
         try
         {
-            SearchService.WriteExportCsv(rows, dlg.FileName);
-            _log.AppendLine($"[추출] {rows.Count:N0}건 → {dlg.FileName}");
-            MessageBox.Show(this, $"{rows.Count:N0}건을 추출했습니다.\n{dlg.FileName}", "추출 완료");
+            var n = await Task.Run(() =>
+            {
+                var records = _repo.LoadRecordsByIds(ids);
+                DocTransferCsv.Write(records, path);
+                return records.Count;
+            });
+            _statusLabel.Text = prev;
+            _log.AppendLine($"[반출] {n:N0}건 (본문 포함) → {path}");
+            MessageBox.Show(this, $"{n:N0}건을 본문 포함으로 반출했습니다.\n{path}", "반출 완료");
         }
         catch (Exception ex)
         {
-            _log.AppendLine($"[추출 실패] {ex.Message}");
-            MessageBox.Show(this, ex.Message, "추출 실패");
+            _statusLabel.Text = prev;
+            _log.AppendLine($"[반출 실패] {ex.Message}");
+            MessageBox.Show(this, ex.Message, "반출 실패");
+        }
+        finally
+        {
+            _exportBtn.Enabled = _checkedIds.Count > 0;
+            _searchBtn.Enabled = true;
         }
     }
 }

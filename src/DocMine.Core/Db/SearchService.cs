@@ -234,32 +234,6 @@ public sealed class SearchService
         return rows;
     }
 
-    /// <summary>ExportRow 목록을 CSV 로 저장 — DriveScanner.WriteCsv 와 동일한
-    /// utf-8-sig BOM 포맷. 컬럼: id,directory,filename,extension,size_bytes,
-    /// modified,parse_status,parsed_at.</summary>
-    public static void WriteExportCsv(IEnumerable<ExportRow> rows, string outPath)
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
-        using var w = new StreamWriter(outPath, append: false,
-            new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
-        w.WriteLine("id,directory,filename,extension,size_bytes,modified,parse_status,parsed_at");
-        foreach (var r in rows)
-        {
-            w.Write(r.Id.ToString(CultureInfo.InvariantCulture));     w.Write(',');
-            w.Write(CsvEscape(r.Directory));                          w.Write(',');
-            w.Write(CsvEscape(r.Filename));                           w.Write(',');
-            w.Write(CsvEscape(r.Extension));                          w.Write(',');
-            w.Write(r.FileSize.ToString(CultureInfo.InvariantCulture)); w.Write(',');
-            w.Write(CsvEscape(r.FileMtime ?? ""));                    w.Write(',');
-            w.Write(CsvEscape(r.ParseStatus));                        w.Write(',');
-            w.Write(CsvEscape(r.ParsedAt?.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) ?? ""));
-            w.Write("\r\n");
-        }
-    }
-
-    private static string CsvEscape(string s)
-    {
-        if (s.IndexOfAny(new[] { ',', '"', '\r', '\n' }) < 0) return s;
-        return "\"" + s.Replace("\"", "\"\"") + "\"";
-    }
+    // 반출 CSV 기록은 본문(body_text) 포함 전송본이라 DocTransferCsv 가 담당.
+    // (구 메타-only WriteExportCsv 는 제거 — manifest 가 경량 대조를 대신함.)
 }
