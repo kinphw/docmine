@@ -161,6 +161,35 @@ public static class CsvIngestHelpers
         return set;
     }
 
+    /// <summary>
+    /// manifest CSV(directory,filename) → 원본 (정규화 안 한) 쌍 목록.
+    /// 합집합 대조에서 '대조에만 있는' 유령 행을 원본 표기로 보여줄 때 사용
+    /// (LoadManifestKeys 는 매칭용 정규화 집합이라 대소문자가 뭉개진다).
+    /// </summary>
+    public static List<(string Dir, string Fn)> LoadManifestRows(string csvPath)
+    {
+        var rows = new List<(string, string)>();
+        using var reader = new StreamReader(csvPath, new System.Text.UTF8Encoding(true));
+        var header = reader.ReadLine();
+        if (header is null) return rows;
+
+        var cols = header.Split(',')
+            .Select((c, i) => (Name: c.Trim().Trim('﻿'), Idx: i))
+            .ToDictionary(p => p.Name, p => p.Idx, StringComparer.OrdinalIgnoreCase);
+        var iDir = cols.TryGetValue("directory", out var a) ? a : 0;
+        var iFn  = cols.TryGetValue("filename",  out var b) ? b : 1;
+
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            var parts = ParseCsvLine(line);
+            if (parts.Count <= Math.Max(iDir, iFn)) continue;
+            if (string.IsNullOrEmpty(parts[iDir]) && string.IsNullOrEmpty(parts[iFn])) continue;
+            rows.Add((parts[iDir], parts[iFn]));
+        }
+        return rows;
+    }
+
     /// <summary>CSV 필드 escape — 콤마/따옴표/개행 포함 시 따옴표로 감싸고 내부 따옴표 중복.</summary>
     public static string CsvEscape(string s)
         => s.IndexOfAny(new[] { ',', '"', '\r', '\n' }) < 0

@@ -1,13 +1,15 @@
-// DbExportTab — ⑤ DB 추출.
+// DbExportTab — ⑤ 반출.
 //
-// ④ 추출(ExtractorTab) 이 '파일 본문 → TXT' 인 것과 달리, 이 탭은
-// 'DB 레코드(메타데이터) → CSV' 다. 요건:
-//   1) 특정 요건으로 검색 (키워드 + 대상/방식 + 적재일 범위)
-//   2) 행별 체크박스 선택 + 전체 선택/해제
-//   3) 선택 행을 CSV 로 추출 (저장 파일명/폴더 지정)
+// DB 레코드를 본문(body_text) 포함 CSV 로 내보내 다른 환경('반입')에 그대로 적재.
 //
-// 검색은 SearchService.SearchForExport (body_text 제외, 메타 전체 컬럼) 사용.
-// 페이징 없이 안전 상한(200,000)까지 한 번에 — 추출은 필터링된 결과가 대상.
+// 두 가지 흐름:
+//   ㆍ 검색 모드(매니페스트 미로드): 키워드/적재일로 검색 → 선택 → 반출.
+//   ㆍ 대조 모드(매니페스트 로드):  현재 env 전체 ∪ 매니페스트 합집합을 두 컬럼
+//      (현재환경/매니페스트)으로 보여줌 → 필터/선택 → 반출.
+//      (어느 쪽이 부분집합인지 무관 — 신규 내보내기·중복 식별 모두 한 뷰로.)
+//
+// 목록 UI 는 반입과 공유하는 EnvCompareList. 본문은 목록에 안 싣고(메타만), 반출
+// 시점에 선택분만 DB 에서 끌어온다(LONGTEXT 대량 로딩 회피).
 
 using DocMine.Core.Config;
 using DocMine.Core.Db;
@@ -17,21 +19,13 @@ namespace DocMine.UI.Tabs;
 
 public sealed class DbExportTab : TabPage
 {
-    // readonly 아님 — ⑥ 설정에서 DB/테이블 변경 시 탭 활성화마다 현재 설정으로 갱신.
     private SearchService _search;
     private DocumentRepository _repo;
 
-    // 환경2 적재 현황(manifest) — NormKey 집합. null = 미로드.
-    private HashSet<(string, string)>? _manifest;
-    // 파일명만 일치 모드용 — manifest 의 파일명(정규화) 집합. 폴더가 바뀌어도 매칭.
-    private HashSet<string>? _manifestNames;
+    // 매니페스트(환경2 적재현황 등 외부 대조본).
+    private List<(string Dir, string Fn)> _manifestRaw = new();   // 유령 행 원본 표기용
+    private bool _manifestLoaded;
     private readonly ToolTip _tip = new() { AutoPopDelay = 12000, InitialDelay = 400, ReshowDelay = 100 };
-
-    // 가상화 — 표시 대상(필터 적용) + 체크 상태(ExportRow.Id 집합).
-    private readonly List<ExportRow> _viewRows = new();
-    private readonly HashSet<int> _checkedIds = new();
-    private int _anchorIndex = -1;    // Shift+클릭 범위의 기준점
-    private bool _anchorChecked;      // 기준점을 마지막으로 설정한 상태(체크/해제) — Shift 범위에 그대로 적용
 
     private readonly TextBox _keywordBox;
     private readonly RadioButton _targetBoth, _targetTitle, _targetBody;
@@ -41,23 +35,18 @@ public sealed class DbExportTab : TabPage
     private readonly DateTimePicker _dateFrom, _dateTo;
     private readonly Button _searchBtn;
     private readonly Label _statusLabel;
+    private Control[] _searchControls = Array.Empty<Control>();
 
-    // 기적재 현황 대조
     private readonly TextBox _manifestBox;
     private readonly Label _manifestStatus;
-    private readonly CheckBox _lockArchivedBox;
-    private readonly CheckBox _excludeArchivedBox;   // 신규만 — 기적재 행을 결과에서 숨김
-    private readonly CheckBox _matchNameOnlyBox;     // 폴더 무시, 파일명만으로 기적재 판정
+    private readonly CheckBox _matchNameOnlyBox;
 
-    // 마지막 검색 결과 원본 — 토글/manifest 로드 시 재검색 없이 재필터링.
-    private IReadOnlyList<ExportRow> _lastResults = Array.Empty<ExportRow>();
+    private IReadOnlyList<ExportRow> _lastResults = Array.Empty<ExportRow>();   // 검색 모드 결과
+    private IReadOnlyList<ExportRow> _fullEnv = Array.Empty<ExportRow>();       // 대조 모드 base(전체 env)
 
-    private readonly ListView _list;
-    private ColumnHeader _archivedCol = null!;   // 환경2 적재 컬럼 — manifest 로드 시 표시
+    private readonly EnvCompareList _cmp;
     private readonly LogPane _log;
-
-    private readonly Button _selectAllBtn, _selectNoneBtn, _exportBtn, _manifestExportBtn;
-    private readonly Label _selInfoLabel;
+    private readonly Button _exportBtn, _manifestExportBtn;
 
     public DbExportTab() : base("⑤ 반출")
     {
@@ -69,11 +58,10 @@ public sealed class DbExportTab : TabPage
         {
             Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(8),
         };
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 검색 컨트롤
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // 결과
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 로그
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-        // ── 상단: 1.검색 / 2.환경2 대조 두 단계 그룹 ─────────────────
         var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 2 };
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
@@ -82,7 +70,6 @@ public sealed class DbExportTab : TabPage
         var searchInner = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 3 };
         searchInner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        // 키워드 + 검색.
         var row1 = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
         row1.Controls.Add(new Label { Text = "키워드:", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
         _keywordBox = new TextBox { Width = 320, Font = new Font("맑은 고딕", 11) };
@@ -95,29 +82,23 @@ public sealed class DbExportTab : TabPage
         row1.Controls.Add(_statusLabel);
         searchInner.Controls.Add(row1, 0, 0);
 
-        // 대상 + 방식 + 제외 포함.
         var row2 = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Padding = new Padding(0, 4, 0, 0) };
         row2.Controls.Add(new Label { Text = "검색 대상:", AutoSize = true, Padding = new Padding(0, 4, 4, 0) });
         _targetBoth  = new RadioButton { Text = "제목+본문", Checked = true, AutoSize = true };
         _targetTitle = new RadioButton { Text = "제목만",    AutoSize = true };
         _targetBody  = new RadioButton { Text = "본문만",    AutoSize = true };
-        row2.Controls.Add(_targetBoth);
-        row2.Controls.Add(_targetTitle);
-        row2.Controls.Add(_targetBody);
+        row2.Controls.Add(_targetBoth); row2.Controls.Add(_targetTitle); row2.Controls.Add(_targetBody);
         row2.Controls.Add(new Label { Text = "  |  ", AutoSize = true, ForeColor = Color.LightGray, Padding = new Padding(0, 4, 0, 0) });
         row2.Controls.Add(new Label { Text = "방식:", AutoSize = true, Padding = new Padding(0, 4, 4, 0) });
         _modeAnd    = new RadioButton { Text = "AND", Checked = true, AutoSize = true };
         _modeOr     = new RadioButton { Text = "OR",  AutoSize = true };
         _modePhrase = new RadioButton { Text = "전체 문자열", AutoSize = true };
-        row2.Controls.Add(_modeAnd);
-        row2.Controls.Add(_modeOr);
-        row2.Controls.Add(_modePhrase);
+        row2.Controls.Add(_modeAnd); row2.Controls.Add(_modeOr); row2.Controls.Add(_modePhrase);
         row2.Controls.Add(new Label { Text = "  |  ", AutoSize = true, ForeColor = Color.LightGray, Padding = new Padding(0, 4, 0, 0) });
         _includeExcludedBox = new CheckBox { Text = "제외 항목 포함", Checked = true, AutoSize = true };
         row2.Controls.Add(_includeExcludedBox);
         searchInner.Controls.Add(row2, 0, 1);
 
-        // 적재일 범위.
         var row3 = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Padding = new Padding(0, 4, 0, 0) };
         _dateFilterBox = new CheckBox { Text = "적재일 범위", AutoSize = true, Padding = new Padding(0, 4, 4, 0) };
         _dateFilterBox.CheckedChanged += (_, _) => OnToggleDateFilter();
@@ -134,21 +115,20 @@ public sealed class DbExportTab : TabPage
         searchGroup.Controls.Add(searchInner);
         top.Controls.Add(searchGroup, 0, 0);
 
-        // ── 2. 환경2 대조 (선택) ──────────────────────────────────────
-        var matchGroup = new GroupBox { Text = "2. 환경2 대조 (선택)", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
+        // ── 2. 환경 대조 (선택) ───────────────────────────────────────
+        var matchGroup = new GroupBox { Text = "2. 환경 대조 (선택)", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
         var matchInner = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 3 };
         matchInner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        // 불러오기 줄 — 환경2 적재현황(manifest) 가져와 대조.
         var loadRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
-        loadRow.Controls.Add(new Label { Text = "환경2 적재현황 CSV:", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
-        _manifestBox = new TextBox { Width = 280 };
+        loadRow.Controls.Add(new Label { Text = "대조 CSV(매니페스트):", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
+        _manifestBox = new TextBox { Width = 260 };
         loadRow.Controls.Add(_manifestBox);
         var manifestBrowse = new Button { Text = "찾아보기…", AutoSize = true, Margin = new Padding(4, 2, 0, 0) };
         manifestBrowse.Click += (_, _) => BrowseManifest();
         loadRow.Controls.Add(manifestBrowse);
         var manifestLoad = new Button { Text = "불러오기", AutoSize = true, Margin = new Padding(4, 2, 0, 0) };
-        manifestLoad.Click += (_, _) => LoadManifest();
+        manifestLoad.Click += async (_, _) => await LoadManifestAsync();
         loadRow.Controls.Add(manifestLoad);
         var manifestUnload = new Button { Text = "해제", AutoSize = true, Margin = new Padding(4, 2, 0, 0) };
         manifestUnload.Click += (_, _) => UnloadManifest();
@@ -157,20 +137,12 @@ public sealed class DbExportTab : TabPage
         loadRow.Controls.Add(_manifestStatus);
         matchInner.Controls.Add(loadRow, 0, 0);
 
-        // 대조 토글 줄.
         var toggleRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Padding = new Padding(0, 2, 0, 0) };
-        _excludeArchivedBox = new CheckBox { Text = "기적재 제외 (신규만)", AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
-        _excludeArchivedBox.CheckedChanged += (_, _) => ReapplyView();
-        toggleRow.Controls.Add(_excludeArchivedBox);
-        _lockArchivedBox = new CheckBox { Text = "기적재 선택 잠금", AutoSize = true, Margin = new Padding(12, 4, 0, 0) };
-        _lockArchivedBox.CheckedChanged += (_, _) => OnToggleLock();
-        toggleRow.Controls.Add(_lockArchivedBox);
-        _matchNameOnlyBox = new CheckBox { Text = "파일명만 일치", AutoSize = true, Margin = new Padding(12, 4, 0, 0) };
-        _matchNameOnlyBox.CheckedChanged += (_, _) => ReapplyView();
+        _matchNameOnlyBox = new CheckBox { Text = "파일명만 일치", AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
+        _matchNameOnlyBox.CheckedChanged += (_, _) => { if (_manifestLoaded) BuildCompareMode(); };
         toggleRow.Controls.Add(_matchNameOnlyBox);
         matchInner.Controls.Add(toggleRow, 0, 1);
 
-        // 생성 줄 — 이 환경(현재 DB) 의 적재현황을 manifest 로 내보내기 (대조와 반대 방향).
         var genRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Padding = new Padding(0, 4, 0, 0) };
         genRow.Controls.Add(new Label { Text = "현재 DB → manifest:", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(0, 6, 4, 0) });
         _manifestExportBtn = new Button { Text = "manifest 내보내기", AutoSize = true, Margin = new Padding(0, 2, 0, 0) };
@@ -180,49 +152,26 @@ public sealed class DbExportTab : TabPage
         matchGroup.Controls.Add(matchInner);
         top.Controls.Add(matchGroup, 0, 1);
 
-        // hover 설명 — 기적재 토글/manifest 의 의미 안내.
         _tip.SetToolTip(_manifestBox,
-            "환경2(법률검토)에서 'manifest 내보내기'로 만든 CSV.\n불러오면 '환경2' 컬럼에 기적재 여부(✓)가 표시됩니다.");
-        _tip.SetToolTip(_excludeArchivedBox,
-            "환경2에 이미 적재된(✓) 행을 결과 목록에서 숨겨 신규만 표시합니다.\n(manifest 를 불러와야 동작)");
-        _tip.SetToolTip(_lockArchivedBox,
-            "환경2에 이미 적재된(✓) 행을 선택/반출하지 못하게 잠급니다.\n켜면 '전체 선택'도 신규만 선택합니다. (manifest 를 불러와야 동작)");
+            "다른 환경에서 'manifest 내보내기'로 만든 CSV(폴더+파일명).\n불러오면 현재 env 전체와 합집합으로 두 컬럼(현재환경/매니페스트) 대조.");
         _tip.SetToolTip(_matchNameOnlyBox,
-            "기적재 판정 시 폴더를 무시하고 파일명만 비교합니다.\n환경1에서 폴더가 바뀌었어도 같은 파일명이면 기적재로 간주.");
+            "대조 시 폴더를 무시하고 파일명만 비교합니다.\n폴더가 바뀌었어도 같은 파일명이면 일치로 간주.");
         _tip.SetToolTip(_manifestExportBtn,
-            "현재 연결된 DB 의 전체 적재현황(폴더+파일명)을 manifest CSV 로 내보냅니다.\n환경2 에서 만들어 환경1 로 옮겨 대조에 사용.");
+            "현재 연결된 DB 전체의 (폴더+파일명)을 manifest CSV 로 내보냅니다.\n상대 환경에서 대조에 사용.");
 
         root.Controls.Add(top, 0, 0);
 
-        // ── 결과 ListView (체크박스) ──────────────────────────────────
-        // WinForms ListView 는 VirtualMode 에서 CheckBoxes 를 지원하지 않는다.
-        // → '선택' 컬럼에 ☑/☐ 를 직접 그리고 행 클릭으로 토글하는 의사 체크박스.
-        _list = new ListView
-        {
-            Dock = DockStyle.Fill,
-            View = View.Details,
-            FullRowSelect = true,
-            HideSelection = false,
-            MultiSelect = false,
-            GridLines = false,
-            Font = new Font("맑은 고딕", 9),
-            VirtualMode = true,  // 전체 결과를 _viewRows 에 두고 보이는 행만 렌더
-        };
-        _list.Columns.Add("선택",     44, HorizontalAlignment.Center);
-        _list.Columns.Add("ID",       50);
-        // 환경2 적재 — manifest 로드 전엔 width 0(숨김), 로드 시 확장.
-        _archivedCol = _list.Columns.Add("환경2", 0, HorizontalAlignment.Center);
-        _list.Columns.Add("폴더",    280);
-        _list.Columns.Add("파일명",  240);
-        _list.Columns.Add("확장자",   60);
-        _list.Columns.Add("크기",     90, HorizontalAlignment.Right);
-        _list.Columns.Add("적재일",  135);
-        _list.Columns.Add("상태",     70);
-        // 체크 상태는 _checkedIds 로 관리, RetrieveVirtualItem 에서 ☑/☐ 복원.
-        // 행 클릭 = 토글(잠금 시 기적재 거부).
-        _list.RetrieveVirtualItem += OnRetrieveItem;
-        _list.MouseClick += OnListMouseClick;
-        root.Controls.Add(_list, 0, 1);
+        // ── 합집합 대조 리스트 (반입과 공유) ──────────────────────────
+        _cmp = new EnvCompareList { Dock = DockStyle.Fill };
+        _cmp.Configure("현재환경", "매니페스트",
+            new EnvCompareList.ColumnDef("ID", 50, HorizontalAlignment.Left),
+            new EnvCompareList.ColumnDef("폴더", 280, HorizontalAlignment.Left),
+            new EnvCompareList.ColumnDef("파일명", 240, HorizontalAlignment.Left),
+            new EnvCompareList.ColumnDef("확장자", 60, HorizontalAlignment.Left),
+            new EnvCompareList.ColumnDef("크기", 90, HorizontalAlignment.Right),
+            new EnvCompareList.ColumnDef("적재일", 135, HorizontalAlignment.Left),
+            new EnvCompareList.ColumnDef("상태", 70, HorizontalAlignment.Left));
+        root.Controls.Add(_cmp, 0, 1);
 
         // ── 로그 ──────────────────────────────────────────────────────
         _log = new LogPane { Dock = DockStyle.Fill };
@@ -234,51 +183,28 @@ public sealed class DbExportTab : TabPage
         var bot = new TableLayoutPanel
         {
             Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 2, RowCount = 1, Padding = new Padding(8, 4, 8, 4),
+            ColumnCount = 1, RowCount = 1, Padding = new Padding(8, 4, 8, 4),
         };
         bot.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        bot.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-
-        var leftFlow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, Anchor = AnchorStyles.Left };
-        _selInfoLabel = new Label
-        {
-            Text = "0건 선택됨", AutoSize = true, ForeColor = Color.Gray,
-            Padding = new Padding(0, 8, 0, 0), Font = new Font("맑은 고딕", 9),
-        };
-        var hintLabel = new Label
-        {
-            Text = "(행 클릭=선택 · Shift+클릭=범위 선택/해제)", AutoSize = true, ForeColor = Color.DarkGray,
-            Padding = new Padding(12, 8, 0, 0), Font = new Font("맑은 고딕", 9),
-        };
-        leftFlow.Controls.Add(_selInfoLabel);
-        leftFlow.Controls.Add(hintLabel);
-        bot.Controls.Add(leftFlow, 0, 0);
-
-        var btnFlow = new FlowLayoutPanel
-        {
-            AutoSize = true, FlowDirection = FlowDirection.RightToLeft,
-            Anchor = AnchorStyles.Top | AnchorStyles.Right,
-        };
-        // 반출 주 흐름 버튼만 — manifest 생성은 '2. 환경2 대조' 그룹으로 분리됨.
-        _exportBtn     = new Button { Text = "선택 항목 반출 (본문 포함)", AutoSize = true, Enabled = false };
-        _selectNoneBtn = new Button { Text = "전체 해제", AutoSize = true, Enabled = false };
-        _selectAllBtn  = new Button { Text = "전체 선택", AutoSize = true, Enabled = false };
-        _exportBtn.Click     += async (_, _) => await ExportSelectedAsync();
-        _selectNoneBtn.Click += (_, _) => SetAllChecked(false);
-        _selectAllBtn.Click  += (_, _) => SetAllChecked(true);
-        // RightToLeft FlowDirection — Add 순서 역순으로 화면에 배치.
+        var btnFlow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+        _exportBtn = new Button { Text = "선택 항목 반출 (본문 포함)", AutoSize = true, Enabled = false };
+        _exportBtn.Click += async (_, _) => await ExportSelectedAsync();
+        _cmp.SelectionChanged += () => _exportBtn.Enabled = _cmp.SelectedCount > 0;
         btnFlow.Controls.Add(_exportBtn);
-        btnFlow.Controls.Add(_selectNoneBtn);
-        btnFlow.Controls.Add(_selectAllBtn);
-        bot.Controls.Add(btnFlow, 1, 0);
+        bot.Controls.Add(btnFlow, 0, 0);
 
         Controls.Add(root);
         Controls.Add(bot);
 
+        _searchControls = new Control[]
+        {
+            _keywordBox, _searchBtn, _targetBoth, _targetTitle, _targetBody,
+            _modeAnd, _modeOr, _modePhrase, _includeExcludedBox, _dateFilterBox, _dateFrom, _dateTo,
+        };
+
         try { _repo.EnsureDatabase(); }
         catch (Exception ex) { _log.AppendLine($"[DB 경고] {ex.Message}"); }
 
-        // ⑥ 설정에서 DB/테이블을 바꿔도 반영되도록 탭 활성화마다 현재 설정으로 갱신.
         VisibleChanged += (_, _) => { if (Visible) RefreshServices(); };
     }
 
@@ -290,14 +216,10 @@ public sealed class DbExportTab : TabPage
     }
 
     private SearchTarget GetTarget()
-        => _targetTitle.Checked ? SearchTarget.Title
-         : _targetBody.Checked  ? SearchTarget.Body
-         : SearchTarget.Both;
+        => _targetTitle.Checked ? SearchTarget.Title : _targetBody.Checked ? SearchTarget.Body : SearchTarget.Both;
 
     private SearchMode GetMode()
-        => _modeOr.Checked     ? SearchMode.Or
-         : _modePhrase.Checked ? SearchMode.Phrase
-         : SearchMode.And;
+        => _modeOr.Checked ? SearchMode.Or : _modePhrase.Checked ? SearchMode.Phrase : SearchMode.And;
 
     private void OnToggleDateFilter()
     {
@@ -305,8 +227,10 @@ public sealed class DbExportTab : TabPage
         _dateTo.Enabled   = _dateFilterBox.Checked;
     }
 
+    // ─ 검색 모드 ──────────────────────────────────────────────────────
     private async Task DoSearchAsync()
     {
+        if (_manifestLoaded) return;   // 대조 모드에선 검색 비활성
         _searchBtn.Enabled = false;
         _statusLabel.Text = "검색 중...";
         try
@@ -315,35 +239,22 @@ public sealed class DbExportTab : TabPage
             var target = GetTarget();
             var mode = GetMode();
             var includeExcluded = _includeExcludedBox.Checked;
-
-            // 적재일 범위 — from 은 그날 00:00, to 는 다음날 00:00(반열림)으로 그날 전체 포함.
             DateTime? pf = null, pt = null;
             if (_dateFilterBox.Checked)
             {
                 pf = _dateFrom.Value.Date;
                 pt = _dateTo.Value.Date.AddDays(1);
-                if (pf > pt)
-                {
-                    MessageBox.Show(this, "적재일 시작이 종료보다 뒤입니다.", "날짜 범위");
-                    _statusLabel.Text = "";
-                    return;
-                }
+                if (pf > pt) { MessageBox.Show(this, "적재일 시작이 종료보다 뒤입니다.", "날짜 범위"); _statusLabel.Text = ""; return; }
             }
 
             var rows = await Task.Run(() => _search.SearchForExport(
-                kw, target, mode, includeExcluded,
-                idMin: null, idMax: null, parsedFrom: pf, parsedTo: pt));
+                kw, target, mode, includeExcluded, idMin: null, idMax: null, parsedFrom: pf, parsedTo: pt));
 
             _lastResults = rows;
-            FillList(rows);
-
-            var dateLabel = _dateFilterBox.Checked
-                ? $" [적재일 {_dateFrom.Value:yyyy-MM-dd}~{_dateTo.Value:yyyy-MM-dd}]"
-                : "";
+            FeedSearchMode();
+            var dateLabel = _dateFilterBox.Checked ? $" [적재일 {_dateFrom.Value:yyyy-MM-dd}~{_dateTo.Value:yyyy-MM-dd}]" : "";
             _log.AppendLine($"[검색] '{kw}'{dateLabel} | table={AppConfig.Current.DbTable} → {rows.Count:N0}건");
-            // 상태 라벨은 FillList → UpdateMatchStats 가 설정 (manifest 대조 합계 포함).
-            if (rows.Count >= 200_000)
-                _log.AppendLine("  ⚠ 안전 상한(200,000건) 도달 — 조건을 좁혀 다시 검색하세요.");
+            if (rows.Count >= 200_000) _log.AppendLine("  ⚠ 안전 상한(200,000건) 도달 — 조건을 좁혀 다시 검색하세요.");
         }
         catch (Exception ex)
         {
@@ -351,201 +262,119 @@ public sealed class DbExportTab : TabPage
             _statusLabel.Text = "오류";
             _log.AppendLine($"[오류] {ex.Message}");
         }
-        finally
-        {
-            _searchBtn.Enabled = true;
-        }
+        finally { _searchBtn.Enabled = !_manifestLoaded; }
     }
 
-    // 검색 결과/토글을 현재 뷰(_viewRows)로 구성 — 가상화라 Items 안 만들고
-    // VirtualListSize 만 세팅. 뷰가 바뀌면 체크 상태(_checkedIds)는 리셋.
-    private void FillList(IReadOnlyList<ExportRow> rows)
+    private void FeedSearchMode()
     {
-        var excludeArchived = _excludeArchivedBox.Checked && _manifest is not null;
-        var hidden = 0;
-
-        _viewRows.Clear();
-        _checkedIds.Clear();
-        _anchorIndex = -1;   // 뷰 재구성 — 인덱스 기준점 무효화
-        foreach (var r in rows)
-        {
-            if (excludeArchived && IsArchived(r)) { hidden++; continue; }
-            _viewRows.Add(r);
-        }
-
-        _list.VirtualListSize = _viewRows.Count;
-        _list.Invalidate();
-
-        if (excludeArchived && hidden > 0)
-            _log.AppendLine($"  기적재 {hidden:N0}건 제외 — 신규 {_viewRows.Count:N0}건 표시");
-
-        var any = _viewRows.Count > 0;
-        _selectAllBtn.Enabled = any;
-        _selectNoneBtn.Enabled = any;
-        UpdateSelInfo();
-        UpdateMatchStats();
+        var rows = _lastResults.Select(r => RowOf(r, inCompare: false)).ToList();
+        _cmp.SetRows(rows, compareLoaded: false);
+        _statusLabel.Text = $"{_lastResults.Count:N0}건";
     }
 
-    // 검색 결과 합계 + (manifest 로드 시) 환경2 기적재/신규 대조 건수.
-    private void UpdateMatchStats()
+    // ─ 대조 모드 ──────────────────────────────────────────────────────
+    private void BuildCompareMode()
     {
-        var total = _lastResults.Count;
-        if (_manifest is null)
-        {
-            _statusLabel.Text = total == 0 ? "" : $"{total:N0}건";
-            return;
-        }
-        // 전체 검색 결과 기준 대조 (파일명만 일치 토글 반영). '기적재 제외' 로 화면에서
-        // 숨겨졌어도 합계는 전체 기준으로 보여준다.
-        var archived = _lastResults.Count(IsArchived);
-        _statusLabel.Text = $"{total:N0}건  ·  환경2 기적재 {archived:N0}  ·  신규 {total - archived:N0}";
+        var union = EnvCompare.Build(_fullEnv, r => (r.Directory, r.Filename), _manifestRaw, _matchNameOnlyBox.Checked);
+        var rows = new List<CompareRow>(union.Base.Count + union.CompareOnly.Count);
+        foreach (var m in union.Base) rows.Add(RowOf(m.Item, m.InCompare));
+        foreach (var g in union.CompareOnly) rows.Add(GhostOf(g));
+        _cmp.SetRows(rows, compareLoaded: true);
+
+        int total = union.Base.Count;
+        int both  = union.Base.Count(m => m.InCompare);
+        _statusLabel.Text = $"현재환경 {total:N0} · 양쪽 일치 {both:N0} · 현재환경만 {total - both:N0} · 매니페스트만 {union.CompareOnly.Count:N0}";
     }
 
-    // 토글/manifest 로드 시 마지막 검색 결과를 현재 뷰 설정으로 재구성 (재검색 없음).
-    private void ReapplyView() => FillList(_lastResults);
-
-    // VirtualMode — 보이는 행만 on-demand 생성. 체크 상태는 _checkedIds 로 복원.
-    private void OnRetrieveItem(object? sender, RetrieveVirtualItemEventArgs e)
+    private static CompareRow RowOf(ExportRow r, bool inCompare) => new()
     {
-        if (e.ItemIndex < 0 || e.ItemIndex >= _viewRows.Count)
-        {
-            e.Item = new ListViewItem("");
-            return;
-        }
-        var r = _viewRows[e.ItemIndex];
-        var sizeStr = r.FileSize >= 1024 * 1024
-            ? $"{r.FileSize / 1024.0 / 1024.0:F1} MB"
-            : $"{r.FileSize / 1024.0:F0} KB";
-        var parsedStr = r.ParsedAt?.ToString("yyyy-MM-dd HH:mm:ss") ?? "";
-        // subitem 순서 = 컬럼 순서 (선택, ID, 환경2, 폴더, 파일명, 확장자, 크기, 적재일, 상태).
-        e.Item = new ListViewItem(new[]
-        {
-            _checkedIds.Contains(r.Id) ? "☑" : "☐",
-            r.Id.ToString(), IsArchived(r) ? "✓" : "", r.Directory, r.Filename, r.Extension,
-            sizeStr, parsedStr, r.ParseStatus,
-        });
-    }
+        Key = (r.Directory, r.Filename),
+        InBase = true,
+        InCompare = inCompare,
+        Cells = new[] { r.Id.ToString(), r.Directory, r.Filename, r.Extension, SizeStr(r.FileSize),
+                        r.ParsedAt?.ToString("yyyy-MM-dd HH:mm:ss") ?? "", r.ParseStatus },
+        Item = r,
+    };
 
-    // 행 클릭 = 선택 토글 (의사 체크박스). 잠금 ON + 기적재면 거부.
-    // Shift+클릭 = anchor ~ 현재 사이를 모두 체크(잠금 시 기적재는 건너뜀).
-    private void OnListMouseClick(object? sender, MouseEventArgs e)
+    private static CompareRow GhostOf((string Dir, string Fn) k) => new()
     {
-        var hit = _list.HitTest(e.Location);
-        if (hit.Item is null) return;
-        var idx = hit.Item.Index;
-        if (idx < 0 || idx >= _viewRows.Count) return;
+        Key = (k.Dir, k.Fn),
+        InBase = false,
+        InCompare = true,
+        Cells = new[] { "", k.Dir, k.Fn, "", "", "", "" },
+        Item = null,
+    };
 
-        if ((Control.ModifierKeys & Keys.Shift) == Keys.Shift && _anchorIndex >= 0 && _anchorIndex < _viewRows.Count)
-        {
-            // Shift+클릭 — 기준점에서 한 동작(체크/해제)을 범위 전체에 그대로 적용.
-            // 잠금 ON 이면 기적재 행은 건드리지 않는다.
-            var lo = Math.Min(_anchorIndex, idx);
-            var hi = Math.Max(_anchorIndex, idx);
-            for (var i = lo; i <= hi; i++)
-            {
-                var rr = _viewRows[i];
-                if (_lockArchivedBox.Checked && IsArchived(rr)) continue;
-                if (_anchorChecked) _checkedIds.Add(rr.Id); else _checkedIds.Remove(rr.Id);
-            }
-            _list.Invalidate();
-        }
-        else
-        {
-            var r = _viewRows[idx];
-            if (_lockArchivedBox.Checked && IsArchived(r)) return;
-            _anchorChecked = _checkedIds.Add(r.Id);   // Add 성공=새로 체크됨 / 실패=이미 있어 해제
-            if (!_anchorChecked) _checkedIds.Remove(r.Id);
-            _anchorIndex = idx;
-            _list.Invalidate(hit.Item.Bounds);
-        }
-        UpdateSelInfo();
-    }
+    private static string SizeStr(long bytes)
+        => bytes >= 1024 * 1024 ? $"{bytes / 1024.0 / 1024.0:F1} MB" : $"{bytes / 1024.0:F0} KB";
 
-    private void SetAllChecked(bool value)
+    private void SetSearchEnabled(bool on)
     {
-        _checkedIds.Clear();
-        if (value)
-        {
-            // 잠금 ON 이면 신규(미적재)만 체크.
-            foreach (var r in _viewRows)
-                if (!(_lockArchivedBox.Checked && IsArchived(r))) _checkedIds.Add(r.Id);
-        }
-        _list.Invalidate();   // 체크 표시 다시 그림
-        UpdateSelInfo();
+        foreach (var c in _searchControls) c.Enabled = on;
+        if (on) OnToggleDateFilter();   // 날짜 picker 는 체크 상태 따름
     }
 
-    // ─ 기적재(환경2) 대조 ─────────────────────────────────────────────
-    // 기본: (폴더+파일명) 완전 일치. '파일명만 일치' ON: 폴더 무시하고 파일명만
-    // (환경1 에서 폴더가 바뀌어도 같은 파일명이면 기적재로 간주).
-    private bool IsArchived(ExportRow r)
-    {
-        if (_matchNameOnlyBox.Checked)
-            return _manifestNames is not null && _manifestNames.Contains(CsvIngestHelpers.NormName(r.Filename));
-        return _manifest is not null && _manifest.Contains(CsvIngestHelpers.NormKey(r.Directory, r.Filename));
-    }
-
-    private void OnToggleLock()
-    {
-        // 잠금을 켜는 순간 이미 체크돼 있던 기적재 행을 해제.
-        if (!_lockArchivedBox.Checked) return;
-        var archivedIds = _viewRows.Where(IsArchived).Select(r => r.Id);
-        _checkedIds.ExceptWith(archivedIds);
-        _list.Invalidate();
-        UpdateSelInfo();
-    }
-
+    // ─ 매니페스트 ─────────────────────────────────────────────────────
     private void BrowseManifest()
     {
         using var dlg = new OpenFileDialog
         {
-            Title = "기적재 현황 CSV 선택 (환경2에서 추출)",
+            Title = "대조 CSV(매니페스트) 선택",
             Filter = "CSV (*.csv;*.csd)|*.csv;*.csd|모든 파일 (*.*)|*.*",
         };
-        if (!string.IsNullOrEmpty(_manifestBox.Text))
-            dlg.FileName = Path.GetFileName(_manifestBox.Text);
-        if (dlg.ShowDialog(this) == DialogResult.OK)
-            _manifestBox.Text = dlg.FileName;
+        if (!string.IsNullOrEmpty(_manifestBox.Text)) dlg.FileName = Path.GetFileName(_manifestBox.Text);
+        if (dlg.ShowDialog(this) == DialogResult.OK) _manifestBox.Text = dlg.FileName;
     }
 
-    private void LoadManifest()
+    private async Task LoadManifestAsync()
     {
         var path = _manifestBox.Text.Trim();
         if (string.IsNullOrEmpty(path) || !File.Exists(path))
         {
-            MessageBox.Show(this, "기적재 현황 CSV 파일을 선택하세요.", "파일 없음");
+            MessageBox.Show(this, "대조 CSV(매니페스트) 파일을 선택하세요.", "파일 없음");
             return;
         }
+        _statusLabel.Text = "대조 준비 중… (전체 env 로드)";
         try
         {
-            _manifest = CsvIngestHelpers.LoadManifestKeys(path);
-            // 파일명만 일치 모드용 — manifest 의 파일명(이미 정규화됨) 집합.
-            _manifestNames = _manifest.Select(t => t.Item2).ToHashSet();
-            _manifestStatus.Text = $"기적재 {_manifest.Count:N0}건 로드됨";
+            var includeExcluded = _includeExcludedBox.Checked;
+            var (manifest, fullEnv) = await Task.Run(() =>
+            {
+                var m = CsvIngestHelpers.LoadManifestRows(path);
+                // 대조 base = 현재 env 전체 (키워드 무관). 메타만(본문 제외).
+                var env = _search.SearchForExport("", SearchTarget.Both, SearchMode.And, includeExcluded);
+                return (m, env);
+            });
+            _manifestRaw = manifest;
+            _fullEnv = fullEnv;
+            _manifestLoaded = true;
+            _manifestStatus.Text = $"매니페스트 {manifest.Count:N0}건 · 현재환경 {fullEnv.Count:N0}건";
             _manifestStatus.ForeColor = Color.SeaGreen;
-            _archivedCol.Width = 60;
-            ReapplyView();   // '환경2' 컬럼 채움 + (제외 토글 시) 신규만 필터
-            _log.AppendLine($"[기적재 현황] {_manifest.Count:N0}건 로드 — {path}");
+            SetSearchEnabled(false);
+            BuildCompareMode();
+            _log.AppendLine($"[대조] 매니페스트 {manifest.Count:N0}건 로드 — {path}");
         }
         catch (Exception ex)
         {
-            _manifest = null;
-            _manifestNames = null;
+            _manifestLoaded = false;
             _manifestStatus.Text = "로드 실패";
             _manifestStatus.ForeColor = Color.Firebrick;
-            MessageBox.Show(this, ex.Message, "기적재 현황 로드 실패");
+            MessageBox.Show(this, ex.Message, "대조 로드 실패");
+            _log.AppendLine($"[오류] {ex.Message}");
         }
     }
 
     private void UnloadManifest()
     {
-        if (_manifest is null) return;
-        _manifest = null;
-        _manifestNames = null;
+        if (!_manifestLoaded) return;
+        _manifestLoaded = false;
+        _manifestRaw = new();
+        _fullEnv = Array.Empty<ExportRow>();
         _manifestStatus.Text = "(미로드)";
         _manifestStatus.ForeColor = Color.Gray;
-        _archivedCol.Width = 0;            // '환경2' 컬럼 숨김
-        ReapplyView();                     // ✓ 표시 제거 + (제외 토글이 켜져 있었으면) 필터 해제
-        _log.AppendLine("[기적재 현황] 해제됨");
+        SetSearchEnabled(true);
+        FeedSearchMode();   // 마지막 검색 결과로 복귀
+        _log.AppendLine("[대조] 해제됨 — 검색 모드");
     }
 
     private async Task ExportManifestAsync()
@@ -560,6 +389,7 @@ public sealed class DbExportTab : TabPage
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
         _manifestExportBtn.Enabled = false;
+        var prev = _statusLabel.Text;
         _statusLabel.Text = "적재현황 추출 중...";
         try
         {
@@ -573,34 +403,18 @@ public sealed class DbExportTab : TabPage
             _log.AppendLine($"[적재현황 실패] {ex.Message}");
             MessageBox.Show(this, ex.Message, "현황 추출 실패");
         }
-        finally
-        {
-            _manifestExportBtn.Enabled = true;
-            _statusLabel.Text = "";
-        }
+        finally { _manifestExportBtn.Enabled = true; _statusLabel.Text = prev; }
     }
 
-    private void UpdateSelInfo()
-    {
-        var n = _checkedIds.Count;
-        _selInfoLabel.Text = $"{n:N0}건 선택됨 (전체 {_viewRows.Count:N0}건)";
-        _exportBtn.Enabled = n > 0;
-    }
-
-    // 선택 행을 본문(body_text) 포함 전송 CSV 로 반출 — 환경2 에서 '반입' 으로 재파싱 없이 적재.
-    // 목록은 메타만 가볍게 들고 있으므로, 본문은 여기서 선택 id 만 DB 에서 끌어온다(백그라운드).
+    // ─ 반출 (본문 포함) ──────────────────────────────────────────────
     private async Task ExportSelectedAsync()
     {
-        var ids = _viewRows.Where(r => _checkedIds.Contains(r.Id)).Select(r => r.Id).ToList();
-        if (ids.Count == 0)
-        {
-            MessageBox.Show(this, "반출할 행을 하나 이상 선택하세요.", "선택 없음");
-            return;
-        }
+        var ids = _cmp.SelectedItems.OfType<ExportRow>().Select(r => r.Id).ToList();
+        if (ids.Count == 0) { MessageBox.Show(this, "반출할 행을 하나 이상 선택하세요.", "선택 없음"); return; }
 
         using var dlg = new SaveFileDialog
         {
-            Title = "반출 CSV 저장 (본문 포함 — 환경2 반입용)",
+            Title = "반출 CSV 저장 (본문 포함 — 상대 환경 반입용)",
             FileName = $"db_export_{DateTime.Now:yyyyMMdd_HHmmss}.csv",
             DefaultExt = "csv",
             Filter = "CSV (*.csv)|*.csv|CSV (*.csd)|*.csd|모든 파일 (*.*)|*.*",
@@ -609,7 +423,6 @@ public sealed class DbExportTab : TabPage
         var path = dlg.FileName;
 
         _exportBtn.Enabled = false;
-        _searchBtn.Enabled = false;
         var prev = _statusLabel.Text;
         _statusLabel.Text = "반출 중… (본문 조회)";
         try
@@ -630,10 +443,6 @@ public sealed class DbExportTab : TabPage
             _log.AppendLine($"[반출 실패] {ex.Message}");
             MessageBox.Show(this, ex.Message, "반출 실패");
         }
-        finally
-        {
-            _exportBtn.Enabled = _checkedIds.Count > 0;
-            _searchBtn.Enabled = true;
-        }
+        finally { _exportBtn.Enabled = _cmp.SelectedCount > 0; }
     }
 }
