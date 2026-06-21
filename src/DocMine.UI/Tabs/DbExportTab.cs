@@ -163,7 +163,7 @@ public sealed class DbExportTab : TabPage
 
         // ── 합집합 대조 리스트 (반입과 공유) ──────────────────────────
         _cmp = new EnvCompareList { Dock = DockStyle.Fill };
-        _cmp.Configure("현재환경", "매니페스트",
+        _cmp.Configure("매니페스트",
             new EnvCompareList.ColumnDef("ID", 50, HorizontalAlignment.Left),
             new EnvCompareList.ColumnDef("폴더", 280, HorizontalAlignment.Left),
             new EnvCompareList.ColumnDef("파일명", 240, HorizontalAlignment.Left),
@@ -275,34 +275,23 @@ public sealed class DbExportTab : TabPage
     // ─ 대조 모드 ──────────────────────────────────────────────────────
     private void BuildCompareMode()
     {
+        // 현재환경(base) 만 표시 — 매니페스트에만 있고 현재환경엔 없는 항목은 안 보인다.
         var union = EnvCompare.Build(_fullEnv, r => (r.Directory, r.Filename), _manifestRaw, _matchNameOnlyBox.Checked);
-        var rows = new List<CompareRow>(union.Base.Count + union.CompareOnly.Count);
-        foreach (var m in union.Base) rows.Add(RowOf(m.Item, m.InCompare));
-        foreach (var g in union.CompareOnly) rows.Add(GhostOf(g));
+        var rows = union.Base.Select(m => RowOf(m.Item, m.InCompare)).ToList();
         _cmp.SetRows(rows, compareLoaded: true);
 
-        int total = union.Base.Count;
+        int total = rows.Count;
         int both  = union.Base.Count(m => m.InCompare);
-        _statusLabel.Text = $"현재환경 {total:N0} · 양쪽 일치 {both:N0} · 현재환경만 {total - both:N0} · 매니페스트만 {union.CompareOnly.Count:N0}";
+        _statusLabel.Text = $"현재환경 {total:N0} · 매니페스트 보유 {both:N0} · 미보유(신규) {total - both:N0}";
     }
 
     private static CompareRow RowOf(ExportRow r, bool inCompare) => new()
     {
         Key = (r.Directory, r.Filename),
-        InBase = true,
         InCompare = inCompare,
         Cells = new[] { r.Id.ToString(), r.Directory, r.Filename, r.Extension, SizeStr(r.FileSize),
                         r.ParsedAt?.ToString("yyyy-MM-dd HH:mm:ss") ?? "", r.ParseStatus },
         Item = r,
-    };
-
-    private static CompareRow GhostOf((string Dir, string Fn) k) => new()
-    {
-        Key = (k.Dir, k.Fn),
-        InBase = false,
-        InCompare = true,
-        Cells = new[] { "", k.Dir, k.Fn, "", "", "", "" },
-        Item = null,
     };
 
     private static string SizeStr(long bytes)

@@ -29,7 +29,7 @@ public sealed class CompareTab : TabPage, IBusyTab
 
     private enum Mode { Track, Struct, Text }
 
-    private readonly TextBox _oldBox, _newBox;
+    private readonly FileDropBox _oldBox, _newBox;
     private readonly Button  _compareBtn, _swapBtn, _saveBtn;
     private readonly RadioButton _modeTrack, _modeStruct, _modeText;
     private readonly CheckBox _ignoreWsBox, _changedOnlyBox;
@@ -55,31 +55,22 @@ public sealed class CompareTab : TabPage, IBusyTab
 
     public CompareTab() : base("⑤ 문서 비교")
     {
-        // ── 입력 경로 (변경 전 / 변경 후) ───────────────────────────────
-        var srcGroup = new GroupBox { Text = "비교할 문서", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
-        var srcGrid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 3 };
-        srcGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        srcGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        srcGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        // ── 입력 (변경 전 / 변경 후) — 좌우 두 개의 드롭 박스 ────────────
+        // 파일을 끌어다 놓거나 클릭해 선택. 한 박스에 2개를 떨구면 전/후를 한꺼번에 채운다.
+        const string hwpFilter = "한/글 문서 (*.hwp;*.hwpx)|*.hwp;*.hwpx|모든 파일 (*.*)|*.*";
+        var srcGroup = new GroupBox { Text = "비교할 문서  (파일을 끌어다 놓거나 박스를 클릭해 선택)", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
+        var srcGrid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 1 };
+        srcGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        srcGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        srcGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 100));
 
-        _oldBox = new TextBox { Dock = DockStyle.Fill, Anchor = AnchorStyles.Left | AnchorStyles.Right };
-        _newBox = new TextBox { Dock = DockStyle.Fill, Anchor = AnchorStyles.Left | AnchorStyles.Right };
-        var oldBrowse = new Button { Text = "찾아보기…", AutoSize = true };
-        var newBrowse = new Button { Text = "찾아보기…", AutoSize = true };
-        oldBrowse.Click += (_, _) => BrowseInto(_oldBox);
-        newBrowse.Click += (_, _) => BrowseInto(_newBox);
+        _oldBox = new FileDropBox { Caption = "변경 전", DialogFilter = hwpFilter, Accept = IsSupported, Dock = DockStyle.Fill };
+        _newBox = new FileDropBox { Caption = "변경 후", DialogFilter = hwpFilter, Accept = IsSupported, Dock = DockStyle.Fill };
+        _oldBox.MultiDropped += (_, files) => FillPair(files);
+        _newBox.MultiDropped += (_, files) => FillPair(files);
 
-        // 드래그앤드롭 — 박스에 파일을 끌어다 놓으면 경로 자동 입력.
-        // 한 박스에 2개를 떨구면 변경 전/후로 한꺼번에 채운다.
-        EnableDrop(_oldBox, _newBox);
-        EnableDrop(_newBox, _oldBox);
-
-        srcGrid.Controls.Add(new Label { Text = "변경 전", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 8, 0) }, 0, 0);
-        srcGrid.Controls.Add(_oldBox,   1, 0);
-        srcGrid.Controls.Add(oldBrowse, 2, 0);
-        srcGrid.Controls.Add(new Label { Text = "변경 후", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 8, 0) }, 0, 1);
-        srcGrid.Controls.Add(_newBox,   1, 1);
-        srcGrid.Controls.Add(newBrowse, 2, 1);
+        srcGrid.Controls.Add(_oldBox, 0, 0);
+        srcGrid.Controls.Add(_newBox, 1, 0);
         srcGroup.Controls.Add(srcGrid);
 
         // ── 동작 버튼 + 옵션 ────────────────────────────────────────────
@@ -96,7 +87,7 @@ public sealed class CompareTab : TabPage, IBusyTab
         _saveBtn        = new Button   { Text = "결과 저장…", AutoSize = true, Enabled = false, Margin = new Padding(16, 0, 0, 0) };
 
         _compareBtn.Click += async (_, _) => { if (_busy) CancelCompare(); else await CompareAsync(); };
-        _swapBtn.Click    += (_, _) => { (_oldBox.Text, _newBox.Text) = (_newBox.Text, _oldBox.Text); };
+        _swapBtn.Click    += (_, _) => { (_oldBox.Path, _newBox.Path) = (_newBox.Path, _oldBox.Path); };
         _modeTrack.CheckedChanged  += (_, _) => OnModeChanged();
         _modeStruct.CheckedChanged += (_, _) => OnModeChanged();
         _modeText.CheckedChanged   += (_, _) => OnModeChanged();
@@ -141,34 +132,17 @@ public sealed class CompareTab : TabPage, IBusyTab
     private Mode CurrentMode =>
         _modeTrack.Checked ? Mode.Track : _modeStruct.Checked ? Mode.Struct : Mode.Text;
 
-    private void EnableDrop(TextBox box, TextBox other)
-    {
-        box.AllowDrop = true;
-        box.DragEnter += (_, e) =>
-        {
-            e.Effect = e.Data?.GetDataPresent(DataFormats.FileDrop) == true
-                ? DragDropEffects.Copy : DragDropEffects.None;
-        };
-        box.DragDrop += (_, e) =>
-        {
-            if (e.Data?.GetData(DataFormats.FileDrop) is not string[] files || files.Length == 0) return;
-            box.Text = files[0];
-            if (files.Length >= 2 && other.Text.Trim().Length == 0) other.Text = files[1];
-        };
-    }
+    private static bool IsSupported(string path) => SupportedExts.Contains(Path.GetExtension(path));
 
-    private void BrowseInto(TextBox box)
+    // 한 박스에 2개를 떨궜을 때 — 변경 전/후를 한꺼번에 채운다(이름순으로 앞=전, 뒤=후).
+    private void FillPair(string[] files)
     {
-        using var dlg = new OpenFileDialog
-        {
-            Title = "비교할 문서 선택",
-            Filter = "한/글 문서 (*.hwp;*.hwpx)|*.hwp;*.hwpx|모든 파일 (*.*)|*.*",
-        };
-        if (box.Text.Trim().Length > 0)
-        {
-            try { dlg.InitialDirectory = Path.GetDirectoryName(Path.GetFullPath(box.Text.Trim())); } catch { }
-        }
-        if (dlg.ShowDialog(this) == DialogResult.OK) box.Text = dlg.FileName;
+        var pick = files.Where(IsSupported)
+            .OrderBy(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase)
+            .Take(2).ToArray();
+        if (pick.Length < 2) return;
+        _oldBox.Path = pick[0];
+        _newBox.Path = pick[1];
     }
 
     private void OnModeChanged()
@@ -194,8 +168,8 @@ public sealed class CompareTab : TabPage, IBusyTab
     {
         if (_busy) return;
 
-        var oldPath = _oldBox.Text.Trim();
-        var newPath = _newBox.Text.Trim();
+        var oldPath = _oldBox.Path;
+        var newPath = _newBox.Path;
         if (!Validate(oldPath, "변경 전") || !Validate(newPath, "변경 후")) return;
 
         var mode = CurrentMode;
@@ -423,8 +397,8 @@ public sealed class CompareTab : TabPage, IBusyTab
 
         var path = dlg.FileName;
         var ext = Path.GetExtension(path).ToLowerInvariant();
-        var oldP = _oldBox.Text.Trim();
-        var newP = _newBox.Text.Trim();
+        var oldP = _oldBox.Path;
+        var newP = _newBox.Path;
 
         // TXT — 인-프로세스로 즉시 저장.
         if (ext == ".txt")
@@ -492,8 +466,8 @@ public sealed class CompareTab : TabPage, IBusyTab
     {
         try
         {
-            var a = Path.GetFileNameWithoutExtension(_oldBox.Text.Trim());
-            var b = Path.GetFileNameWithoutExtension(_newBox.Text.Trim());
+            var a = Path.GetFileNameWithoutExtension(_oldBox.Path);
+            var b = Path.GetFileNameWithoutExtension(_newBox.Path);
             return $"비교_{a}_vs_{b}.{ext}";
         }
         catch { return $"비교결과.{ext}"; }
@@ -503,8 +477,8 @@ public sealed class CompareTab : TabPage, IBusyTab
     {
         var sb = new StringBuilder();
         sb.AppendLine("# DocMine 문서 비교 결과");
-        sb.AppendLine($"#   변경 전: {_oldBox.Text.Trim()}");
-        sb.AppendLine($"#   변경 후: {_newBox.Text.Trim()}");
+        sb.AppendLine($"#   변경 전: {_oldBox.Path}");
+        sb.AppendLine($"#   변경 후: {_newBox.Path}");
         sb.AppendLine($"#   {summary}");
         sb.AppendLine(new string('=', 70));
         return sb.ToString();
