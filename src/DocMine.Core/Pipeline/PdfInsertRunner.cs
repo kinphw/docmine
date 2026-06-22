@@ -23,11 +23,10 @@ using MySqlConnector;
 namespace DocMine.Core.Pipeline;
 
 public sealed record PdfInsertProgress(
-    int Total,    // 처리 대상 (CSV 의 PDF 행 총수)
+    int Total,    // 처리 대상 = 미적재 PDF 건수 (기적재 제외)
     int Index,    // 현재 처리 완료 누적
     int Ok,
     int Err,
-    int Skip,
     int Empty);
 
 public sealed class PdfInsertRunner
@@ -99,24 +98,22 @@ ON DUPLICATE KEY UPDATE
         if (knownKeys.Count > 0)
             onLog?.Invoke($"  ✓ DB 기존 파일 {knownKeys.Count:N0}건은 파싱 없이 건너뜁니다.");
 
-        // ── 1) skip 대상 bulk 제외 — DB 기존 파일은 한 번에 카운트 ──
-        // (skip 수만 건을 개별 Tick + onProgress 호출하면 UI 메시지 큐 폭주로 메인 GUI 죽음.)
-        var stats = new Stats(rows.Count);
+        // ── 1) 기적재(DB 기존 키) 제외 — 진행 분모는 '미적재(처리 대상)' 기준 ──
+        // 기적재는 진행 카운트에 더하지 않고 별도로만 표기한다. 진행바가 0% 에서 시작해
+        // '실제 파싱할 건수' 가 분모가 되므로 UX 가 직관적 (전체-기적재 혼동 제거).
         var toProcess = new List<(int Idx, CsvRow Row)>();
         for (var i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
             if (knownKeys.Contains(CsvIngestHelpers.NormKey(row.Directory, row.Filename)))
-                continue;  // skip 대상 — 아래서 bulk 카운트
+                continue;
             toProcess.Add((start + i, row));
         }
         var skipCount = rows.Count - toProcess.Count;
-        if (skipCount > 0)
-        {
-            stats.TickSkipBulk(skipCount);
-            onProgress?.Invoke(stats.Snapshot());
-        }
-        onLog?.Invoke($"  처리 대상: {toProcess.Count:N0}건 (skip {skipCount:N0}건 제외)");
+        onLog?.Invoke($"  처리 대상(미적재): {toProcess.Count:N0}건 · 기적재 {skipCount:N0}건 건너뜀");
+
+        var stats = new Stats(toProcess.Count);
+        onProgress?.Invoke(stats.Snapshot());   // 진행바 0/N 초기 표시
 
         // ── 처리 대상 → 작업 리스트 ──
         // 파일 존재 점검은 워커 단계로 미룬다(병렬 + 건별 진행). 메타데이터라 DRM 안전.
@@ -260,14 +257,15 @@ ON DUPLICATE KEY UPDATE
             {
                 cur.CommandText = $"SELECT COUNT(*) FROM `{_cfg.DbTable}`";
                 var dbCount = Convert.ToInt32(cur.ExecuteScalar());
-                var matchStr = stats.Cur == rows.Count
+                var matchStr = stats.Cur == toProcess.Count
                     ? "일치"
-                    : $"불일치 (처리 {stats.Cur} vs 대상 {rows.Count})";
+                    : $"불일치 (처리 {stats.Cur} vs 대상 {toProcess.Count})";
                 onLog?.Invoke("");
                 onLog?.Invoke("  [건수 대조]");
-                onLog?.Invoke($"    이번 배치 대상 : {rows.Count:N0}건");
-                onLog?.Invoke($"    이번 배치 처리 : {stats.Cur:N0}건  {matchStr}");
-                onLog?.Invoke($"    DB 전체 누적   : {dbCount:N0}건 (HWP + PDF 합산)");
+                onLog?.Invoke($"    대상(미적재)  : {toProcess.Count:N0}건");
+                onLog?.Invoke($"    기적재 건너뜀 : {skipCount:N0}건");
+                onLog?.Invoke($"    처리 완료     : {stats.Cur:N0}건  {matchStr}");
+                onLog?.Invoke($"    DB 전체 누적  : {dbCount:N0}건 (HWP + PDF 합산)");
             }
         }
         catch (Exception ex) { onLog?.Invoke($"  [통계 조회 실패] {ex.Message}"); }
@@ -351,7 +349,7 @@ ON DUPLICATE KEY UPDATE
     {
         public int Cur;
         public int Ok, Err, Skip, Empty;
-        private readonly int _total;
+        private readonly int _total;   // 처리 대상(미적재) 수 — 기적재는 포함하지 않음
         public Stats(int total) => _total = total;
 
         public void Tick(string status)
@@ -366,10 +364,7 @@ ON DUPLICATE KEY UPDATE
             }
         }
 
-        /// <summary>DB 기존 파일 skip 을 한 번에 카운트 — 개별 Tick + onProgress 폭주 회피.</summary>
-        public void TickSkipBulk(int n) { Cur += n; Skip += n; }
-
-        public PdfInsertProgress Snapshot() => new(_total, Cur, Ok, Err, Skip, Empty);
+        public PdfInsertProgress Snapshot() => new(_total, Cur, Ok, Err, Empty);
 
         public string Summary()
         {

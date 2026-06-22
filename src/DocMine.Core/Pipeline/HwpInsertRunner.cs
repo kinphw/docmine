@@ -20,7 +20,7 @@ using MySqlConnector;
 namespace DocMine.Core.Pipeline;
 
 public sealed record HwpInsertProgress(
-    int Total, int Index, int Ok, int Err, int Skip, int Crash);
+    int Total, int Index, int Ok, int Err, int Crash);
 
 public sealed class HwpInsertRunner
 {
@@ -86,9 +86,9 @@ ON DUPLICATE KEY UPDATE
         if (knownKeys.Count > 0)
             onLog?.Invoke($"  ✓ DB 기존 파일 {knownKeys.Count:N0}건은 파싱 없이 건너뜁니다.");
 
-        var stats = new Stats(rows.Count);
-
-        // ── skip 대상 bulk 제외 — 개별 Tick + onProgress 폭주 회피 (PDF 와 동일) ──
+        // ── 기적재(DB 기존 키) 제외 — 진행 분모는 '미적재(처리 대상)' 기준 ──
+        // 기적재는 진행 카운트에 더하지 않고 별도로만 표기한다. 진행바가 0% 에서 시작해
+        // '실제 파싱할 건수' 가 분모가 되므로 UX 가 직관적 (전체-기적재 혼동 제거).
         var toProcess = new List<(int Idx, CsvRow Row)>();
         for (int i = 0; i < rows.Count; i++)
         {
@@ -97,18 +97,16 @@ ON DUPLICATE KEY UPDATE
             toProcess.Add((start + i, row));
         }
         var skipCount = rows.Count - toProcess.Count;
-        if (skipCount > 0)
-        {
-            stats.TickSkipBulk(skipCount);
-            onProgress?.Invoke(stats.Snapshot());
-        }
-        onLog?.Invoke($"  처리 대상: {toProcess.Count:N0}건 (skip {skipCount:N0}건 제외)");
+        onLog?.Invoke($"  처리 대상(미적재): {toProcess.Count:N0}건 · 기적재 {skipCount:N0}건 건너뜀");
 
         if (toProcess.Count == 0)
         {
             onLog?.Invoke("  모든 파일이 이미 DB 에 있습니다 — 파싱 없이 종료.");
             return 0;
         }
+
+        var stats = new Stats(toProcess.Count);
+        onProgress?.Invoke(stats.Snapshot());   // 진행바 0/N 초기 표시
 
         // 시작 시점에 이전 실행의 좀비 Hwp.exe 정리 (Python 패턴).
         HwpComExtractor_ProcessKill();
@@ -225,13 +223,14 @@ ON DUPLICATE KEY UPDATE
                 using var cmd = conn.CreateCommand();
                 cmd.CommandText = $"SELECT COUNT(*) FROM `{_cfg.DbTable}`";
                 var dbCount = Convert.ToInt32(cmd.ExecuteScalar());
-                var matchStr = stats.Cur == rows.Count
-                    ? "일치" : $"불일치 (처리 {stats.Cur} vs 대상 {rows.Count})";
+                var matchStr = stats.Cur == toProcess.Count
+                    ? "일치" : $"불일치 (처리 {stats.Cur} vs 대상 {toProcess.Count})";
                 onLog?.Invoke("");
                 onLog?.Invoke("  [건수 대조]");
-                onLog?.Invoke($"    이번 배치 대상 : {rows.Count:N0}건");
-                onLog?.Invoke($"    이번 배치 처리 : {stats.Cur:N0}건  {matchStr}");
-                onLog?.Invoke($"    DB 전체 누적   : {dbCount:N0}건");
+                onLog?.Invoke($"    대상(미적재)  : {toProcess.Count:N0}건");
+                onLog?.Invoke($"    기적재 건너뜀 : {skipCount:N0}건");
+                onLog?.Invoke($"    처리 완료     : {stats.Cur:N0}건  {matchStr}");
+                onLog?.Invoke($"    DB 전체 누적  : {dbCount:N0}건");
             }
             catch (Exception ex) { onLog?.Invoke($"  [통계 조회 실패] {ex.Message}"); }
         }
@@ -363,7 +362,7 @@ ON DUPLICATE KEY UPDATE
     private sealed class Stats
     {
         public int Cur, Ok, Err, Skip, Empty, Crash;
-        private readonly int _total;
+        private readonly int _total;   // 처리 대상(미적재) 수 — 기적재는 포함하지 않음
         public Stats(int total) => _total = total;
         public void Tick(string s)
         {
@@ -377,8 +376,7 @@ ON DUPLICATE KEY UPDATE
                 case "crash":   Crash++; break;
             }
         }
-        public void TickSkipBulk(int n) { Cur += n; Skip += n; }
-        public HwpInsertProgress Snapshot() => new(_total, Cur, Ok, Err, Skip, Crash);
+        public HwpInsertProgress Snapshot() => new(_total, Cur, Ok, Err, Crash);
         public string Summary()
         {
             var empty = Empty > 0 ? $" empty:{Empty}" : "";

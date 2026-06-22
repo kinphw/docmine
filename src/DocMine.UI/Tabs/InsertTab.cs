@@ -7,7 +7,10 @@
 //   3) [선택 항목 적재] — 검증 리스트에서 체크한 행만 임시 CSV 로 추려 적재.
 //
 // 대상(HWP/PDF) 체크박스로 선택. 각 Runner 가 자기 확장자만 필터링하므로
-// 단일 CSV 를 공유하고, 순차 적재(HWP→PDF). 한 대상 실패해도 다음 계속.
+// 단일 CSV 를 공유한다. 둘 다 선택하면 독립 Task 로 *동시 병렬* 적재하고
+// (각자 별도 DB 커넥션·워커·에러로그라 충돌 없음) 로그창을 좌우로 나눠 표시한다.
+// 한 대상 실패해도 다른 대상은 계속(각 Task 가 자기 예외를 자기 로그에 기록).
+// 진행 분모는 '미적재(처리 대상)' 기준 — 기적재(skip)는 분모에서 빼고 별도 표기.
 
 using DocMine.Core.Config;
 using DocMine.Core.Db;
@@ -37,8 +40,12 @@ public sealed class InsertTab : TabPage, IBusyTab
     private readonly Button _stopBtn;
     private readonly Label _selInfoLabel;
 
-    private readonly LogPane _log;
-    private readonly ProgressEta _eta = new();
+    private readonly LogPane _hwpLog;
+    private readonly LogPane _pdfLog;
+    private readonly SplitContainer _logSplit;
+    private bool _splitInitialized;
+    private readonly ProgressEta _hwpEta = new();
+    private readonly ProgressEta _pdfEta = new();
     private CancellationTokenSource? _cts;
     private bool _busy;
 
@@ -57,9 +64,9 @@ public sealed class InsertTab : TabPage, IBusyTab
         {
             Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(8),
         };
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 입력/대상/검증
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // 검증 리스트
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 로그
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 입력/대상/검증
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // 검증 리스트
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 190)); // 로그 (좌우 분할)
 
         // ── 상단 (입력 CSV + 대상 + 검증) ────────────────────────────
         var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 4 };
@@ -127,11 +134,23 @@ public sealed class InsertTab : TabPage, IBusyTab
         _list.MouseClick += OnListMouseClick;
         root.Controls.Add(_list, 0, 1);
 
-        // ── 로그 ──────────────────────────────────────────────────────
-        _log = new LogPane { Dock = DockStyle.Fill };
-        var logFrame = new GroupBox { Text = "로그", Dock = DockStyle.Fill, Height = 150, Padding = new Padding(4) };
-        logFrame.Controls.Add(_log);
-        root.Controls.Add(logFrame, 0, 2);
+        // ── 로그 (HWP / PDF 좌우 2분할 — 동시 적재 시 각 파이프라인 진행을 나란히) ──
+        _hwpLog = new LogPane { Dock = DockStyle.Fill };
+        _pdfLog = new LogPane { Dock = DockStyle.Fill };
+        var hwpFrame = new GroupBox { Text = "HWP 로그", Dock = DockStyle.Fill, Padding = new Padding(4) };
+        hwpFrame.Controls.Add(_hwpLog);
+        var pdfFrame = new GroupBox { Text = "PDF 로그", Dock = DockStyle.Fill, Padding = new Padding(4) };
+        pdfFrame.Controls.Add(_pdfLog);
+        _logSplit = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterWidth = 6 };
+        _logSplit.Panel1.Controls.Add(hwpFrame);
+        _logSplit.Panel2.Controls.Add(pdfFrame);
+        // 첫 유효 크기에 스플리터를 가운데로(이후 사용자 조절은 보존).
+        _logSplit.SizeChanged += (_, _) =>
+        {
+            if (_splitInitialized || _logSplit.Width <= 4 * _logSplit.Panel1MinSize) return;
+            try { _logSplit.SplitterDistance = _logSplit.Width / 2; _splitInitialized = true; } catch { }
+        };
+        root.Controls.Add(_logSplit, 0, 2);
 
         Controls.Add(root);
 
@@ -204,6 +223,9 @@ public sealed class InsertTab : TabPage, IBusyTab
         }
         _verifyBtn.Enabled = false;
         _statusLabel.Text = "검증 중...";
+        // 검증 결과는 양쪽 패널 모두 표시.
+        _logSplit.Panel1Collapsed = false;
+        _logSplit.Panel2Collapsed = false;
         try
         {
             var cfg = AppConfig.Current;
@@ -222,13 +244,13 @@ public sealed class InsertTab : TabPage, IBusyTab
 
             var total = _all.Count;
             var loaded = _all.Count(r => r.Loaded);
-            _log.AppendLine($"[검증] {Path.GetFileName(csv)} | table={cfg.DbTable} → 전체 {total:N0} · 적재됨 {loaded:N0} · 미적재 {total - loaded:N0}");
+            LogBoth($"[검증] {Path.GetFileName(csv)} | table={cfg.DbTable} → 전체 {total:N0} · 적재됨 {loaded:N0} · 미적재 {total - loaded:N0}");
         }
         catch (Exception ex)
         {
             MessageBox.Show(this, ex.Message, "검증 오류");
             _statusLabel.Text = "오류";
-            _log.AppendLine($"[오류] {ex.Message}");
+            LogBoth($"[오류] {ex.Message}");
         }
         finally
         {
@@ -370,40 +392,32 @@ public sealed class InsertTab : TabPage, IBusyTab
 
         SetBusy(true);
         _cts = new CancellationTokenSource();
-        _log.Clear();
+        var token = _cts.Token;
+
+        // 선택된 대상만 로그 패널 표시 (둘 다면 좌우 동시 진행).
+        _logSplit.Panel1Collapsed = !_hwpBox.Checked;
+        _logSplit.Panel2Collapsed = !_pdfBox.Checked;
+        _hwpLog.Clear();
+        _pdfLog.Clear();
 
         var cfg = AppConfig.Current;
-        _log.AppendLine($"  DB: {cfg.DbUser}@{cfg.DbHost}:{cfg.DbPort}/{cfg.DbName} (table={cfg.DbTable})");
-        _log.AppendLine(tempCsv
-            ? $"  모드: 선택 항목 적재 ({selectedCount:N0}건)"
-            : "  모드: 미적재 전체 적재 (이미 적재된 건 skip)");
-        _log.AppendLine($"  대상: {(_hwpBox.Checked ? "HWP " : "")}{(_pdfBox.Checked ? "PDF" : "")}".TrimEnd());
+        var mode = tempCsv ? $"선택 항목 적재 ({selectedCount:N0}건)" : "미적재 전체 적재 (기적재 skip)";
 
-        var token = _cts.Token;
-        try
-        {
-            if (_hwpBox.Checked)
-            {
-                _log.AppendLine("\n  ── HWP 적재 ──");
-                _eta.Reset();
-                var runner = new HwpInsertRunner(cfg);
-                await Task.Run(() => runner.RunAsync(csv, 0, null,
-                    onLog: line => _log.AppendLine(line), onProgress: OnHwpProgress,
-                    cancellationToken: token), token);
-            }
-            if (_pdfBox.Checked)
-            {
-                _log.AppendLine("\n  ── PDF 적재 ──");
-                _eta.Reset();
-                var runner = new PdfInsertRunner(cfg);
-                await Task.Run(() => runner.RunAsync(csv, 0, null,
-                    onLog: line => _log.AppendLine(line), onProgress: OnPdfProgress,
-                    cancellationToken: token), token);
-            }
-            _log.AppendLine("\n  전체 적재 완료.");
-        }
-        catch (OperationCanceledException) { _log.AppendLine("\n  중단됨."); }
-        catch (Exception ex) { _log.AppendLine($"\n[오류] {ex.GetType().Name}: {ex.Message}"); }
+        // HWP / PDF 를 독립 Task 로 동시 실행 — 각자 별도 DB 커넥션·워커·에러로그라 충돌 없음.
+        // 한쪽 실패가 다른쪽을 막지 않도록 각 Task 가 자기 예외를 자기 로그에 기록한다.
+        var jobs = new List<Task>();
+        if (_hwpBox.Checked)
+            jobs.Add(RunOneAsync(_hwpLog, _hwpEta, cfg, mode, "HWP", token,
+                () => new HwpInsertRunner(cfg).RunAsync(csv, 0, null,
+                    onLog: line => _hwpLog.AppendLine(line), onProgress: OnHwpProgress,
+                    cancellationToken: token)));
+        if (_pdfBox.Checked)
+            jobs.Add(RunOneAsync(_pdfLog, _pdfEta, cfg, mode, "PDF", token,
+                () => new PdfInsertRunner(cfg).RunAsync(csv, 0, null,
+                    onLog: line => _pdfLog.AppendLine(line), onProgress: OnPdfProgress,
+                    cancellationToken: token)));
+
+        try { await Task.WhenAll(jobs); }
         finally
         {
             SetBusy(false);
@@ -412,21 +426,40 @@ public sealed class InsertTab : TabPage, IBusyTab
         }
     }
 
+    // 단일 파이프라인(HWP 또는 PDF) 실행 — 자기 로그/ETA 로 헤더·완료·예외를 기록.
+    // 두 파이프라인이 동시에 돌 수 있으므로 공유 상태(_log 등)를 건드리지 않는다.
+    private async Task RunOneAsync(LogPane log, ProgressEta eta, AppConfig cfg, string mode, string tag,
+        CancellationToken token, Func<Task<int>> run)
+    {
+        log.AppendLine($"  DB: {cfg.DbUser}@{cfg.DbHost}:{cfg.DbPort}/{cfg.DbName} (table={cfg.DbTable})");
+        log.AppendLine($"  모드: {mode}");
+        log.AppendLine($"\n  ── {tag} 적재 ──");
+        eta.Reset();
+        try
+        {
+            await Task.Run(run, token);
+            log.AppendLine($"\n  {tag} 적재 완료.");
+        }
+        catch (OperationCanceledException) { log.AppendLine("\n  중단됨."); }
+        catch (Exception ex) { log.AppendLine($"\n[오류] {ex.GetType().Name}: {ex.Message}"); }
+    }
+
     private void OnHwpProgress(HwpInsertProgress p)
     {
         var pct = p.Total == 0 ? 100 : p.Index * 100.0 / p.Total;
         var crash = p.Crash > 0 ? $" crash:{p.Crash}" : "";
-        var skip  = p.Skip  > 0 ? $" skip:{p.Skip}"   : "";
-        _log.UpdateLive($"  [HWP {ProgressBar(pct, 30)}] {p.Index}/{p.Total}  ok:{p.Ok} err:{p.Err}{crash}{skip}{_eta.Format(p.Index, p.Total)}");
+        _hwpLog.UpdateLive($"  [HWP {ProgressBar(pct, 30)}] {p.Index}/{p.Total}  ok:{p.Ok} err:{p.Err}{crash}{_hwpEta.Format(p.Index, p.Total)}");
     }
 
     private void OnPdfProgress(PdfInsertProgress p)
     {
         var pct = p.Total == 0 ? 100 : p.Index * 100.0 / p.Total;
         var empty = p.Empty > 0 ? $" empty:{p.Empty}" : "";
-        var skip  = p.Skip  > 0 ? $" skip:{p.Skip}"   : "";
-        _log.UpdateLive($"  [PDF {ProgressBar(pct, 30)}] {p.Index}/{p.Total}  ok:{p.Ok} err:{p.Err}{empty}{skip}{_eta.Format(p.Index, p.Total)}");
+        _pdfLog.UpdateLive($"  [PDF {ProgressBar(pct, 30)}] {p.Index}/{p.Total}  ok:{p.Ok} err:{p.Err}{empty}{_pdfEta.Format(p.Index, p.Total)}");
     }
+
+    // 검증 등 통합 메시지 — 양쪽 패널에 동일하게 기록.
+    private void LogBoth(string text) { _hwpLog.AppendLine(text); _pdfLog.AppendLine(text); }
 
     private void OnStop()
     {
