@@ -25,6 +25,10 @@ public sealed class SettingsTab : TabPage
     private readonly Label _statusLabel;
     private readonly ListBox _excludeList;
 
+    // 보도자료 코퍼스(press) — 외부 stn_press_db 읽기전용 참조 설정.
+    private readonly CheckBox _pressEnabledBox, _pressShowPwBox;
+    private readonly TextBox _pressDbBox, _pressUserBox, _pressPwBox, _pressBaseDirBox;
+
     public SettingsTab() : base("⑥ 설정")
     {
         _data = UserSettings.Load();
@@ -33,10 +37,11 @@ public sealed class SettingsTab : TabPage
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 6,
             Padding = new Padding(12),
             AutoScroll = true,
         };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -104,6 +109,54 @@ public sealed class SettingsTab : TabPage
         excludeGroup.Controls.Add(excludeContainer);
         root.Controls.Add(excludeGroup, 0, 1);
 
+        // ── 보도자료 코퍼스 (press · 읽기전용 참조) ────────────────────
+        // 외부 stn_press_db 의 보도자료를 '③ 검색' 에 합쳐 보여주기 위한 설정.
+        // press DB 가 없는 환경에서는 자동으로 무시되므로(런타임 프로브) 비워둬도 무방.
+        var pressGroup = MakeGroup("보도자료 코퍼스 (press · 읽기전용)");
+        var pressContainer = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1 };
+
+        _pressEnabledBox = new CheckBox
+        {
+            Text = "보도자료 검색 포함 (DB 에 있을 때만)",
+            AutoSize = true, Checked = _data.PressEnabled, Margin = new Padding(0, 0, 0, 4),
+        };
+        _pressEnabledBox.CheckedChanged += (_, _) => SaveNow(verbose: false);
+        pressContainer.Controls.Add(_pressEnabledBox);
+
+        var pressGrid = MakeGrid();
+        AddLabel(pressGrid, 0, "DB 이름");  _pressDbBox   = AddTextBox(pressGrid, 0, _data.PressDbName);
+        AddLabel(pressGrid, 1, "사용자");   _pressUserBox = AddTextBox(pressGrid, 1, _data.PressDbUser);
+        AddLabel(pressGrid, 2, "비밀번호");
+        var pressPwRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, Margin = Padding.Empty };
+        _pressPwBox = new TextBox { Width = 240, UseSystemPasswordChar = true, Text = _data.PressDbPassword };
+        _pressShowPwBox = new CheckBox { Text = "표시", AutoSize = true, Margin = new Padding(6, 4, 0, 0) };
+        _pressShowPwBox.CheckedChanged += (_, _) => _pressPwBox.UseSystemPasswordChar = !_pressShowPwBox.Checked;
+        pressPwRow.Controls.Add(_pressPwBox);
+        pressPwRow.Controls.Add(_pressShowPwBox);
+        pressGrid.Controls.Add(pressPwRow, 1, 2);
+
+        AddLabel(pressGrid, 3, "원본 폴더");
+        var pressDirRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, Margin = Padding.Empty };
+        _pressBaseDirBox = new TextBox { Width = 360, Text = _data.PressFilesBaseDir, Margin = new Padding(0, 2, 0, 2) };
+        var pressBrowseBtn = new Button { Text = "찾아보기…", AutoSize = true, Margin = new Padding(6, 1, 0, 0) };
+        pressBrowseBtn.Click += (_, _) => OnPickPressBaseDir();
+        pressDirRow.Controls.Add(_pressBaseDirBox);
+        pressDirRow.Controls.Add(pressBrowseBtn);
+        pressGrid.Controls.Add(pressDirRow, 1, 3);
+
+        var pressHint = new Label
+        {
+            Text = "• 보도자료 본문은 DB 에서 바로 검색됩니다(파싱 불필요).\n" +
+                   "• 호스트/포트는 위 MariaDB 접속과 같은 인스턴스를 사용합니다.\n" +
+                   "• '원본 폴더' 는 검색 결과에서 '원본 파일 열기' 할 때만 쓰며, 파일이 없어도 검색에는 영향 없습니다.",
+            ForeColor = Color.Gray, AutoSize = true, Margin = new Padding(0, 4, 0, 0),
+        };
+
+        pressContainer.Controls.Add(pressGrid);
+        pressContainer.Controls.Add(pressHint);
+        pressGroup.Controls.Add(pressContainer);
+        root.Controls.Add(pressGroup, 0, 2);
+
         // ── 하단 액션 + 상태 ────────────────────────────────────────────
         var bot = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(0, 8, 0, 0) };
         var saveBtn = new Button { Text = "지금 저장", AutoSize = true };
@@ -118,13 +171,13 @@ public sealed class SettingsTab : TabPage
         bot.Controls.Add(saveBtn);
         bot.Controls.Add(openFolderBtn);
         bot.Controls.Add(pathLbl);
-        root.Controls.Add(bot, 0, 2);
+        root.Controls.Add(bot, 0, 3);
 
         _statusLabel = new Label
         {
             Dock = DockStyle.Top, AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(0, 4, 0, 0),
         };
-        root.Controls.Add(_statusLabel, 0, 3);
+        root.Controls.Add(_statusLabel, 0, 4);
 
         // 안내 텍스트.
         var note = new Label
@@ -135,12 +188,16 @@ public sealed class SettingsTab : TabPage
                    "• CSV 출력 파일명은 '스캔' 탭에서 매 실행마다 직접 바꿀 수 있습니다.\n" +
                    "• 스캔 드라이브는 '스캔' 탭에서 마운트된 드라이브 목록을 보고 직접 선택합니다.",
         };
-        root.Controls.Add(note, 0, 4);
+        root.Controls.Add(note, 0, 5);
 
         Controls.Add(root);
 
         // ─ Leave 이벤트로 자동 저장 ─ Forge UserSettings 패턴.
-        foreach (var tb in new[] { _hostBox, _portBox, _userBox, _pwBox, _dbBox, _tableBox })
+        foreach (var tb in new[]
+        {
+            _hostBox, _portBox, _userBox, _pwBox, _dbBox, _tableBox,
+            _pressDbBox, _pressUserBox, _pressPwBox, _pressBaseDirBox,
+        })
             tb.Leave += (_, _) => SaveNow(verbose: false);
     }
 
@@ -174,6 +231,26 @@ public sealed class SettingsTab : TabPage
         _data.DbName = _dbBox.Text.Trim();
         _data.DbTable = _tableBox.Text.Trim();
         _data.ScanExcludeDirs = _excludeList.Items.Cast<string>().ToList();
+
+        _data.PressEnabled      = _pressEnabledBox.Checked;
+        _data.PressDbName       = _pressDbBox.Text.Trim();
+        _data.PressDbUser       = _pressUserBox.Text.Trim();
+        _data.PressDbPassword   = _pressPwBox.Text;
+        _data.PressFilesBaseDir = _pressBaseDirBox.Text.Trim();
+    }
+
+    private void OnPickPressBaseDir()
+    {
+        using var dlg = new FolderBrowserDialog
+        {
+            Description = "보도자료 원본 파일 루트 폴더 선택 (하위에 source\\folder\\파일)",
+            ShowNewFolderButton = false,
+        };
+        if (!string.IsNullOrWhiteSpace(_pressBaseDirBox.Text) && Directory.Exists(_pressBaseDirBox.Text))
+            dlg.SelectedPath = _pressBaseDirBox.Text;
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        _pressBaseDirBox.Text = dlg.SelectedPath;
+        SaveNow(verbose: false);
     }
 
     private void OnAddExclude()

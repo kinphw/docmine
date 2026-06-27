@@ -30,6 +30,20 @@ public sealed class UserSettingsData
     // 등록된 경로의 하위 트리는 enumerate 자체를 안 함 (재귀 prune).
     // 예: C:\Users\<user>\OneDrive 추가 시 동기화 폴더 전부 skip.
     public List<string> ScanExcludeDirs { get; set; } = new();
+
+    // ── 보도자료 코퍼스(press) 연계 — 외부 stn_press_db 읽기전용 참조 ──────
+    // 외부 프로젝트(stn-crawler)가 적재한 4대 기관 보도자료를 검색에 합치기 위한 설정.
+    // 결합점은 DB 스키마(press_document)뿐이며 DocMine 은 SELECT 만 한다(절대 쓰지 않음).
+    // press DB 가 없는 환경(환경1)에서는 런타임 프로브가 자동으로 비활성 → 아래 값은 무시됨.
+    // 호스트/포트는 메인 DB 와 같은 인스턴스로 가정해 DbHost/DbPort 를 재사용한다.
+    public bool   PressEnabled      { get; set; } = true;                       // 마스터 토글
+    public string PressDbName       { get; set; } = "stn_press_db";
+    public string PressDbUser       { get; set; } = "pdbuser";                  // 읽기전용 계정
+    public string PressDbPassword   { get; set; } = "1226";
+    // 원본 파일(첨부 pdf/hwp) 열람용 루트. 본문 검색은 DB 만으로 충분하고, 이 경로는
+    // '원본 파일 열기' 용으로만 쓴다. 폐쇄망 등 파일이 없으면 검색에는 영향 없다.
+    // 실제 경로 = <PressFilesBaseDir>\<source>\<folder>\<file_name>.
+    public string PressFilesBaseDir { get; set; } = @"C:\projects\stn-crawler\data";
 }
 
 public static class UserSettings

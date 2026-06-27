@@ -29,13 +29,19 @@ namespace DocMine.UI.Tabs;
 
 public sealed class SearchTab : TabPage
 {
+    // 결과 행의 출처 — 로컬 documents vs 외부 보도자료(press). id 가 두 테이블에서 겹치므로
+    // 선택 보존·삭제 차단·원본 경로 구성에 이 구분자를 쓴다.
+    private enum RowOrigin { Local, Press }
+
     private sealed record FullRow(
-        int Id, string Directory, string Filename,
+        int Id, RowOrigin Origin, string? Source,
+        string Directory, string Filename,
         string PreviewFull, string ParsedAtStr, bool IsExcluded);
 
     // readonly 아님 — ⑥ 설정에서 DB/테이블 변경 시 탭 활성화마다 현재 설정으로 갱신.
     private SearchService _search;
     private DocumentRepository _repo;
+    private PressCorpusService _press;   // 외부 보도자료 코퍼스(있을 때만 검색에 합침)
 
     // 검색 컨트롤
     private readonly TextBox _keywordBox;
@@ -44,12 +50,13 @@ public sealed class SearchTab : TabPage
     private readonly RadioButton _targetBoth, _targetTitle, _targetBody;
     private readonly RadioButton _modeAnd, _modeOr, _modePhrase;
     private readonly CheckBox _includeExcludedBox;
+    private readonly CheckBox _includePressBox;   // 보도자료 포함 — press 가용 시에만 노출
     private readonly CheckBox _idFilterBox;
     private readonly TextBox _idMinBox, _idMaxBox;
     private readonly CheckBox _showParsedAtBox;   // 우상단 — 적재일 컬럼 표시 토글
 
-    // ListView 컬럼 인덱스 — 한 곳에서 관리 (적재일 컬럼 삽입으로 미리보기가 밀림).
-    private const int ColId = 0, ColDir = 1, ColFile = 2, ColParsedAt = 3, ColPreview = 4;
+    // ListView 컬럼 인덱스 — 한 곳에서 관리 (출처/적재일 컬럼 삽입으로 미리보기가 밀림).
+    private const int ColId = 0, ColOrigin = 1, ColDir = 2, ColFile = 3, ColParsedAt = 4, ColPreview = 5;
 
     // 결과 ListView + 로그
     private readonly ListView _list;
@@ -76,11 +83,17 @@ public sealed class SearchTab : TabPage
     // 제외 행 표시용 italic 폰트. ForeColor 안 건드려 selection highlight 와 충돌 안 함.
     private readonly Font _italicFont;
 
+    // 헤더 클릭 정렬 상태 — VirtualMode 라 _rows 를 직접 정렬해 반영.
+    private int _sortCol = -1;
+    private bool _sortAsc = true;
+    private string[] _baseHeaders = Array.Empty<string>();   // 화살표 제거용 원본 헤더
+
     public SearchTab() : base("③ 검색 (HWP+PDF)")
     {
         var cfg = AppConfig.Current;
         _search = new SearchService(cfg);
         _repo = new DocumentRepository(cfg);
+        _press = new PressCorpusService(cfg);
 
         _italicFont = new Font("맑은 고딕", 9, FontStyle.Italic);
 
@@ -116,6 +129,22 @@ public sealed class SearchTab : TabPage
         var clearKwBtn = new Button { Text = "초기화", AutoSize = true, Margin = new Padding(4, 2, 0, 0) };
         clearKwBtn.Click += (_, _) => { _keywordBox.Clear(); _keywordBox.Focus(); };
         row1.Controls.Add(clearKwBtn);
+
+        // 보도자료 포함 — 기능 비중에 맞춰 키워드/검색과 같은 윗줄에 강조(Bold) 배치, 기본 ON.
+        // press 코퍼스가 가용한 환경(환경2)에서만 노출 — 가용성은 RefreshServices 의
+        // 백그라운드 프로브가 판정해 Visible 을 켠다. 토글만으로는 재검색하지 않고
+        // (press 쿼리가 무거워 매 토글 즉시 실행은 어색) 다음 [검색] 때 반영된다.
+        _includePressBox = new CheckBox
+        {
+            Text = "보도자료 포함",
+            AutoSize = true,
+            Checked = true,
+            Visible = false,
+            Font = new Font("맑은 고딕", 10, FontStyle.Bold),
+            Margin = new Padding(16, 5, 0, 0),
+        };
+        row1.Controls.Add(_includePressBox);
+
         _statusLabel = new Label { Text = "", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(12, 6, 0, 0) };
         row1.Controls.Add(_statusLabel);
         top.Controls.Add(row1, 0, 0);
@@ -187,11 +216,16 @@ public sealed class SearchTab : TabPage
         };
         _list.RetrieveVirtualItem += OnRetrieveItem;
         _list.Columns.Add("ID",              50);
+        // 출처 — 로컬 / 보도·기관. 컬럼 인덱스는 ColOrigin 상수와 일치해야 함.
+        _list.Columns.Add("출처",            90);
         _list.Columns.Add("폴더",           300);
         _list.Columns.Add("파일명",         280);
         // 적재일 — 기본 width 0(숨김). '적재일 표시' 체크 시 ToggleParsedAtColumn 으로 확장.
         _parsedAtCol = _list.Columns.Add("적재일", 0);
         _list.Columns.Add("내용 미리보기",  500);
+        // 정렬 화살표를 붙였다 떼기 위한 원본 헤더 텍스트 보존.
+        _baseHeaders = _list.Columns.Cast<ColumnHeader>().Select(c => c.Text).ToArray();
+        _list.ColumnClick += OnColumnClick;
         _list.DoubleClick += (_, _) => OpenSelectedFile();
         _list.SelectedIndexChanged += (_, _) => OnSelectionChanged();
         _list.MouseMove  += OnListMouseMove;
@@ -276,6 +310,24 @@ public sealed class SearchTab : TabPage
         var cfg = AppConfig.Current;
         _search = new SearchService(cfg);
         _repo   = new DocumentRepository(cfg);
+        _press  = new PressCorpusService(cfg);
+        _ = UpdatePressAvailabilityAsync();
+    }
+
+    // press 가용성 프로브(백그라운드) → '보도자료 포함' 체크박스 표시 여부 결정.
+    // 환경1(press 없음)에선 프로브 실패로 체크박스가 끝까지 숨겨진다.
+    private async Task UpdatePressAvailabilityAsync()
+    {
+        var press = _press;   // 캡처 — 다른 RefreshServices 가 _press 를 갈아끼워도 이 호출 결과는 일관.
+        bool available;
+        try { available = await Task.Run(press.IsAvailable); }
+        catch { available = false; }
+        if (IsDisposed || !IsHandleCreated) return;
+        // _press 가 그새 교체됐으면 이 결과는 버린다(최신 프로브가 다시 갱신).
+        if (!ReferenceEquals(press, _press)) return;
+        _includePressBox.Visible = available;
+        if (available)
+            _log.AppendLine($"[보도자료] press 코퍼스 연결됨 — '보도자료 포함' 으로 검색에 합쳐집니다.");
     }
 
     // ─ Ctrl+C / Ctrl+Insert / Del — 폼 단에서 가로채기 ───────────────
@@ -340,33 +392,61 @@ public sealed class SearchTab : TabPage
             var (idMin, idMax) = ParseIdFilters();
             _lastKw = kw; _lastMode = mode;
 
+            // 보도자료 포함 조건 — 체크 ON + 가용 + ID 범위 미사용.
+            // (press 는 로컬과 별도 id 공간이라 ID 범위 필터가 의미 없으므로 그땐 제외한다.)
+            var includePress = _includePressBox.Visible && _includePressBox.Checked
+                               && idMin is null && idMax is null;
+
             // 선택/표시 초기화 — VirtualMode 라 Items.Clear 대신 VirtualListSize=0.
             _list.SelectedIndices.Clear();
             _rows.Clear();
             _list.VirtualListSize = 0;
 
-            var total = await Task.Run(() => _search.CountResults(kw, target, mode, includeExcluded, idMin, idMax));
+            var (localTotal, pressTotal) = await Task.Run(() =>
+            {
+                var lt = _search.CountResults(kw, target, mode, includeExcluded, idMin, idMax);
+                var pt = includePress ? _press.Count(kw, target, mode, includeExcluded) : 0;
+                return (lt, pt);
+            });
+            var total = localTotal + pressTotal;
 
             var modeLabel = mode switch { SearchMode.Or => "OR", SearchMode.Phrase => "전체문자열", _ => "AND" };
             var idLabel = (idMin, idMax) switch { (null, null) => "", _ => $" [ID {idMin}~{idMax}]" };
             var exLabel = includeExcluded ? " [제외 포함]" : "";
-            _log.AppendLine($"[검색] '{kw}' | 대상: {target} | 방식: {modeLabel}{exLabel}{idLabel} | table={AppConfig.Current.DbTable} → {total:N0}건");
+            var pressLabel = includePress ? $" + 보도자료 {pressTotal:N0}" : "";
+            _log.AppendLine($"[검색] '{kw}' | 대상: {target} | 방식: {modeLabel}{exLabel}{idLabel} | table={AppConfig.Current.DbTable} → 로컬 {localTotal:N0}{pressLabel} = {total:N0}건");
 
             // 전체를 한 번에 로드(백그라운드) + 스니펫까지 미리 계산해 FullRow 로.
             // body 원본(5000자)은 버리고 스니펫만 메모리에 — 대량도 메모리 가벼움.
             var built = await Task.Run(() =>
             {
-                var raw = _search.Search(kw, target, mode,
-                    limit: total, offset: 0, includeExcluded: includeExcluded, idMin: idMin, idMax: idMax);
                 var kws = SearchService.PrepareKeywords(kw, mode);
-                var list = new List<FullRow>(raw.Count);
+                var list = new List<FullRow>(total);
+
+                // 로컬 documents.
+                var raw = _search.Search(kw, target, mode,
+                    limit: localTotal, offset: 0, includeExcluded: includeExcluded, idMin: idMin, idMax: idMax);
                 foreach (var r in raw)
                 {
                     var isExcluded = string.IsNullOrEmpty(r.BodyChunk);
                     var preview = isExcluded ? "" : SearchService.ExtractSnippet(r.BodyChunk, kws);
                     list.Add(new FullRow(
-                        r.Id, r.Directory, r.Filename, preview,
+                        r.Id, RowOrigin.Local, null, r.Directory, r.Filename, preview,
                         r.ParsedAt?.ToString("yyyy-MM-dd HH:mm") ?? "", isExcluded));
+                }
+
+                // 보도자료 press — 있을 때만 이어붙임. 출처(Origin/Source)로 로컬과 구분.
+                if (includePress && pressTotal > 0)
+                {
+                    var praw = _press.Search(kw, target, mode, limit: pressTotal, includeExcluded: includeExcluded);
+                    foreach (var p in praw)
+                    {
+                        var isExcluded = string.IsNullOrEmpty(p.ContentChunk);
+                        var preview = isExcluded ? "" : SearchService.ExtractSnippet(p.ContentChunk, kws);
+                        list.Add(new FullRow(
+                            p.Id, RowOrigin.Press, p.Source, p.Folder, p.FileName, preview,
+                            p.PublishedDate?.ToString("yyyy-MM-dd") ?? "", isExcluded));
+                    }
                 }
                 return list;
             });
@@ -374,6 +454,7 @@ public sealed class SearchTab : TabPage
             _total = total;
             _rows.Clear();
             _rows.AddRange(built);
+            if (_sortCol >= 0) SortRows();   // 직전 정렬 기준이 있으면 새 결과에도 유지
             _list.VirtualListSize = _rows.Count;
             _list.Invalidate();
             UpdateStatus();
@@ -402,8 +483,8 @@ public sealed class SearchTab : TabPage
         var r = _rows[e.ItemIndex];
         var fnShort = r.Filename.Length > 53 ? r.Filename[..50] + "…" : r.Filename;
         var previewShort = r.PreviewFull.Length > 150 ? r.PreviewFull[..150] + "…" : r.PreviewFull;
-        // subitem 순서 = 컬럼 순서 (ID, 폴더, 파일명, 적재일, 미리보기).
-        var item = new ListViewItem(new[] { r.Id.ToString(), r.Directory, fnShort, r.ParsedAtStr, previewShort })
+        // subitem 순서 = 컬럼 순서 (ID, 출처, 폴더, 파일명, 적재일, 미리보기).
+        var item = new ListViewItem(new[] { r.Id.ToString(), OriginCell(r), r.Directory, fnShort, r.ParsedAtStr, previewShort })
         {
             UseItemStyleForSubItems = true,
         };
@@ -414,6 +495,78 @@ public sealed class SearchTab : TabPage
 
     private void UpdateStatus()
         => _statusLabel.Text = $"{_total:N0}건";
+
+    // 출처 셀 표시 문자열 — 로컬 / 보도·기관.
+    private static string OriginCell(FullRow r)
+        => r.Origin == RowOrigin.Local ? "로컬" : $"보도·{PressCorpusService.SourceLabel(r.Source)}";
+
+    // 행 → 실제 파일 경로. 로컬은 directory+filename, press 는 설정된 원본 루트 기준으로 재구성.
+    // press 원본은 검색에 필수가 아니며(본문은 DB) 파일이 없으면 호출부의 File.Exists 가드가 처리.
+    private static string ResolvePath(FullRow r)
+    {
+        if (r.Origin == RowOrigin.Press)
+        {
+            var baseDir = AppConfig.Current.PressFilesBaseDir;
+            if (!string.IsNullOrWhiteSpace(baseDir) && !string.IsNullOrEmpty(r.Source))
+                return Path.Combine(baseDir, r.Source, r.Directory, r.Filename);
+        }
+        return Path.Combine(r.Directory, r.Filename);
+    }
+
+    // ─ 헤더 클릭 정렬 ────────────────────────────────────────────────
+    private void OnColumnClick(object? sender, ColumnClickEventArgs e)
+    {
+        if (_rows.Count == 0) return;
+        if (_sortCol == e.Column) _sortAsc = !_sortAsc;
+        else { _sortCol = e.Column; _sortAsc = true; }
+
+        SortRows();
+        _list.VirtualListSize = _rows.Count;
+        _list.Invalidate();
+        OnSelectionChanged();
+    }
+
+    // _rows 를 현재 정렬 컬럼/방향으로 in-place 정렬. VirtualMode 인덱스 선택은 정렬 후
+    // 다른 행을 가리키므로 Id 로 선택을 보존한다.
+    private void SortRows()
+    {
+        if (_sortCol < 0) return;
+        // 컬럼별 비교 — 표시 문자열이 아니라 원본 필드로 비교(ID 숫자, 적재일 ISO 문자열).
+        Comparison<FullRow> cmp = _sortCol switch
+        {
+            ColId       => (a, b) => a.Id.CompareTo(b.Id),
+            ColOrigin   => (a, b) => string.Compare(OriginCell(a), OriginCell(b), StringComparison.CurrentCulture),
+            ColDir      => (a, b) => string.Compare(a.Directory, b.Directory, StringComparison.CurrentCulture),
+            ColFile     => (a, b) => string.Compare(a.Filename, b.Filename, StringComparison.CurrentCulture),
+            ColParsedAt => (a, b) => string.Compare(a.ParsedAtStr, b.ParsedAtStr, StringComparison.Ordinal),
+            ColPreview  => (a, b) => string.Compare(a.PreviewFull, b.PreviewFull, StringComparison.CurrentCulture),
+            _           => (_, _) => 0,
+        };
+        int dir = _sortAsc ? 1 : -1;
+
+        // 선택 보존 키 — 로컬/press id 가 겹치므로 (출처,id) 복합키로.
+        var selKeys = new HashSet<(RowOrigin, int)>(_list.SelectedIndices.Cast<int>()
+            .Where(i => i >= 0 && i < _rows.Count).Select(i => (_rows[i].Origin, _rows[i].Id)));
+
+        _rows.Sort((a, b) => dir * cmp(a, b));
+
+        _list.SelectedIndices.Clear();
+        if (selKeys.Count > 0)
+            for (int i = 0; i < _rows.Count; i++)
+                if (selKeys.Contains((_rows[i].Origin, _rows[i].Id))) _list.SelectedIndices.Add(i);
+
+        UpdateSortIndicator();
+    }
+
+    private void UpdateSortIndicator()
+    {
+        if (_baseHeaders.Length != _list.Columns.Count) return;
+        for (int i = 0; i < _list.Columns.Count; i++)
+        {
+            var arrow = i == _sortCol ? (_sortAsc ? "  ▲" : "  ▼") : "";
+            _list.Columns[i].Text = _baseHeaders[i] + arrow;
+        }
+    }
 
     private void OnToggleIdFilter()
     {
@@ -445,22 +598,31 @@ public sealed class SearchTab : TabPage
             return;
         }
 
-        var anyExcluded = sel.Any(r => r.IsExcluded);
-        var anyNormal   = sel.Any(r => !r.IsExcluded);
-        if (anyExcluded && anyNormal)
+        // 보도자료(press)는 읽기 전용(crawler 소유) — 선택에 섞여 있으면 삭제/제외 불가.
+        if (sel.Any(r => r.Origin == RowOrigin.Press))
         {
             _delBtn.Enabled = false;
-            _delBtn.Text = "혼합 선택 불가";
-        }
-        else if (anyExcluded)
-        {
-            _delBtn.Enabled = true;
-            _delBtn.Text = "완전 삭제 (Del)";
+            _delBtn.Text = "보도자료 삭제 불가";
         }
         else
         {
-            _delBtn.Enabled = true;
-            _delBtn.Text = "제외 (Del)";
+            var anyExcluded = sel.Any(r => r.IsExcluded);
+            var anyNormal   = sel.Any(r => !r.IsExcluded);
+            if (anyExcluded && anyNormal)
+            {
+                _delBtn.Enabled = false;
+                _delBtn.Text = "혼합 선택 불가";
+            }
+            else if (anyExcluded)
+            {
+                _delBtn.Enabled = true;
+                _delBtn.Text = "완전 삭제 (Del)";
+            }
+            else
+            {
+                _delBtn.Enabled = true;
+                _delBtn.Text = "제외 (Del)";
+            }
         }
 
         _openBtn.Enabled     = sel.Count == 1;
@@ -468,7 +630,7 @@ public sealed class SearchTab : TabPage
 
         if (sel.Count == 1)
         {
-            var fp = Path.Combine(sel[0].Directory, sel[0].Filename);
+            var fp = ResolvePath(sel[0]);
             _infoLabel.Text = fp.Length <= 110 ? fp : fp[..107] + "…";
             _infoLabel.ForeColor = Color.Black;
         }
@@ -486,10 +648,13 @@ public sealed class SearchTab : TabPage
         var sel = SelectedRows();
         if (sel.Count != 1) return;
         var row = sel[0];
-        var fp = Path.Combine(row.Directory, row.Filename);
+        var fp = ResolvePath(row);
         if (!File.Exists(fp))
         {
-            MessageBox.Show(this, $"파일을 찾을 수 없습니다:\n{fp}", "파일 없음");
+            var extra = row.Origin == RowOrigin.Press
+                ? "\n\n보도자료 원본 파일이 이 환경에 없을 수 있습니다(본문은 검색됨).\n'⑥ 설정'의 '원본 폴더' 경로를 확인하세요."
+                : "";
+            MessageBox.Show(this, $"파일을 찾을 수 없습니다:\n{fp}{extra}", "파일 없음");
             return;
         }
         try
@@ -504,7 +669,8 @@ public sealed class SearchTab : TabPage
         var sel = SelectedRows();
         if (sel.Count != 1) return;
         var row = sel[0];
-        var fp = Path.Combine(row.Directory, row.Filename);
+        var fp = ResolvePath(row);
+        var dir = Path.GetDirectoryName(fp) ?? row.Directory;
         try
         {
             if (File.Exists(fp))
@@ -512,13 +678,13 @@ public sealed class SearchTab : TabPage
                 var norm = Path.GetFullPath(fp);
                 Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{norm}\"") { UseShellExecute = true });
             }
-            else if (Directory.Exists(row.Directory))
+            else if (Directory.Exists(dir))
             {
-                Process.Start(new ProcessStartInfo(Path.GetFullPath(row.Directory)) { UseShellExecute = true });
+                Process.Start(new ProcessStartInfo(Path.GetFullPath(dir)) { UseShellExecute = true });
             }
             else
             {
-                MessageBox.Show(this, $"경로를 찾을 수 없습니다:\n{row.Directory}", "경로 없음");
+                MessageBox.Show(this, $"경로를 찾을 수 없습니다:\n{dir}", "경로 없음");
             }
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "열기 실패"); }
@@ -533,6 +699,12 @@ public sealed class SearchTab : TabPage
         if (idxs.Count == 0) return;
 
         var rows = idxs.Select(i => _rows[i]).ToList();
+        // 보도자료(press)는 읽기 전용 — 삭제/제외 대상에서 원천 차단(불변식).
+        if (rows.Any(r => r.Origin == RowOrigin.Press))
+        {
+            MessageBox.Show(this, "보도자료(press)는 읽기 전용이라 제외/삭제할 수 없습니다.", "읽기 전용");
+            return;
+        }
         var allExcluded = rows.All(r => r.IsExcluded);
         var allNormal   = rows.All(r => !r.IsExcluded);
         if (!allExcluded && !allNormal) return;
@@ -573,7 +745,7 @@ public sealed class SearchTab : TabPage
         var sel = SelectedRows();
         if (sel.Count == 0) return;
         var paths = sel
-            .Select(r => Path.Combine(r.Directory, r.Filename))
+            .Select(ResolvePath)
             .Where(File.Exists)
             .ToList();
         if (paths.Count == 0)
@@ -594,7 +766,7 @@ public sealed class SearchTab : TabPage
         var sel = SelectedRows();
         if (sel.Count == 0) return;
         var paths = sel
-            .Select(r => Path.Combine(r.Directory, r.Filename))
+            .Select(ResolvePath)
             .Where(File.Exists)
             .ToArray();
         if (paths.Length == 0) return;
@@ -636,10 +808,12 @@ public sealed class SearchTab : TabPage
         menu.Items.Add("경로 열기", null, (_, _) => OpenSelectedPath()).Enabled = singleSel;
         menu.Items.Add(new ToolStripSeparator());
 
-        if (_delBtn.Enabled && _delBtn.Text != "혼합 선택 불가")
+        // 우클릭 직전 단독 선택 전환으로 OnSelectionChanged 가 _delBtn 상태(텍스트/활성)를
+        // 이미 갱신했으므로 그 사유(혼합/보도자료)를 그대로 메뉴에 노출한다.
+        if (_delBtn.Enabled)
             menu.Items.Add(_delBtn.Text, null, (_, _) => DeleteSelected());
         else
-            menu.Items.Add("혼합 선택 불가").Enabled = false;
+            menu.Items.Add(_delBtn.Text).Enabled = false;
 
         menu.Show(_list, e.Location);
     }

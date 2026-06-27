@@ -21,6 +21,7 @@ public sealed class DbExportTab : TabPage
 {
     private SearchService _search;
     private DocumentRepository _repo;
+    private PressCorpusService _press;
 
     // 매니페스트(환경2 적재현황 등 외부 대조본).
     private List<(string Dir, string Fn)> _manifestRaw = new();   // 유령 행 원본 표기용
@@ -48,11 +49,22 @@ public sealed class DbExportTab : TabPage
     private readonly LogPane _log;
     private readonly Button _exportBtn, _manifestExportBtn;
 
+    // ── 보도자료(press) 증분 반출 ──────────────────────────────────────
+    private GroupBox _searchGroup = null!, _matchGroup = null!, _pressGroup = null!;
+    private RadioButton _targetDocs = null!, _targetPress = null!;
+    private Button _pressLoadBtn = null!;
+    private Label _pressStatus = null!;
+    private bool _pressMode;
+    private readonly string _ledgerPath = PressExportLedger.DefaultPath();
+    private IReadOnlyList<PressExportMeta> _pressMeta = Array.Empty<PressExportMeta>();
+    private PressExportLedger _ledger = new();
+
     public DbExportTab() : base("⑤ 반출")
     {
         var cfg = AppConfig.Current;
         _search = new SearchService(cfg);
         _repo = new DocumentRepository(cfg);
+        _press = new PressCorpusService(cfg);
 
         var root = new TableLayoutPanel
         {
@@ -62,11 +74,25 @@ public sealed class DbExportTab : TabPage
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-        var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 2 };
+        var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 4 };
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
+        // ── 대상 토글: 내부문서 / 보도자료(press) ──────────────────────
+        // 보도자료는 press 코퍼스가 가용한 환경(환경2)에서만 활성. 기존 내부문서 반출
+        // 흐름은 그대로 두고, 보도자료는 '전체 vs 반출이력' 증분 반출 모드로 전환한다.
+        var modeRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false, Padding = new Padding(0, 0, 0, 4) };
+        modeRow.Controls.Add(new Label { Text = "대상:", AutoSize = true, Padding = new Padding(0, 6, 6, 0) });
+        _targetDocs  = new RadioButton { Text = "내부문서", Checked = true, AutoSize = true };
+        _targetPress = new RadioButton { Text = "보도자료(press)", AutoSize = true, Enabled = false,
+                                         Font = new Font("맑은 고딕", 9, FontStyle.Bold) };
+        _targetDocs.CheckedChanged  += (_, _) => { if (_targetDocs.Checked)  SetMode(press: false); };
+        _targetPress.CheckedChanged += (_, _) => { if (_targetPress.Checked) SetMode(press: true); };
+        modeRow.Controls.Add(_targetDocs);
+        modeRow.Controls.Add(_targetPress);
+        top.Controls.Add(modeRow, 0, 0);
+
         // ── 1. 검색 조건 ──────────────────────────────────────────────
-        var searchGroup = new GroupBox { Text = "1. 검색 조건", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
+        _searchGroup = new GroupBox { Text = "1. 검색 조건", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
         var searchInner = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 3 };
         searchInner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
@@ -112,11 +138,11 @@ public sealed class DbExportTab : TabPage
         row3.Controls.Add(_dateTo);
         row3.Controls.Add(new Label { Text = "(적재 시각 기준, 양끝 포함)", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(8, 4, 0, 0) });
         searchInner.Controls.Add(row3, 0, 2);
-        searchGroup.Controls.Add(searchInner);
-        top.Controls.Add(searchGroup, 0, 0);
+        _searchGroup.Controls.Add(searchInner);
+        top.Controls.Add(_searchGroup, 0, 1);
 
         // ── 2. 환경 대조 (선택) ───────────────────────────────────────
-        var matchGroup = new GroupBox { Text = "2. 환경 대조 (선택)", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
+        _matchGroup = new GroupBox { Text = "2. 환경 대조 (선택)", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
         var matchInner = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 3 };
         matchInner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
@@ -149,8 +175,8 @@ public sealed class DbExportTab : TabPage
         _manifestExportBtn.Click += async (_, _) => await ExportManifestAsync();
         genRow.Controls.Add(_manifestExportBtn);
         matchInner.Controls.Add(genRow, 0, 2);
-        matchGroup.Controls.Add(matchInner);
-        top.Controls.Add(matchGroup, 0, 1);
+        _matchGroup.Controls.Add(matchInner);
+        top.Controls.Add(_matchGroup, 0, 2);
 
         _tip.SetToolTip(_manifestBox,
             "다른 환경에서 'manifest 내보내기'로 만든 CSV(폴더+파일명).\n불러오면 현재 env 전체와 합집합으로 두 컬럼(현재환경/매니페스트) 대조.");
@@ -159,18 +185,45 @@ public sealed class DbExportTab : TabPage
         _tip.SetToolTip(_manifestExportBtn,
             "현재 연결된 DB 전체의 (폴더+파일명)을 manifest CSV 로 내보냅니다.\n상대 환경에서 대조에 사용.");
 
+        // ── 보도자료(press) 증분 반출 (대상=보도자료 일 때만 표시) ──────
+        _pressGroup = new GroupBox { Text = "보도자료 증분 반출 (press · 반출이력 기준)", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8), Visible = false };
+        var pressInner = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 3 };
+        pressInner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        var pRow1 = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
+        _pressLoadBtn = new Button { Text = "목록 불러오기 (전체 vs 반출이력)", AutoSize = true };
+        _pressLoadBtn.Click += async (_, _) => await LoadPressListAsync();
+        pRow1.Controls.Add(_pressLoadBtn);
+        _pressStatus = new Label { Text = "(미로드)", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(12, 6, 0, 0) };
+        pRow1.Controls.Add(_pressStatus);
+        pressInner.Controls.Add(pRow1, 0, 0);
+
+        var pRow2 = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Padding = new Padding(0, 4, 0, 0) };
+        pRow2.Controls.Add(new Label { Text = $"반출이력: {_ledgerPath}", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(0, 6, 8, 0) });
+        var ledgerOpenBtn = new Button { Text = "폴더 열기", AutoSize = true, Margin = new Padding(0, 2, 4, 0) };
+        ledgerOpenBtn.Click += (_, _) => OpenLedgerFolder();
+        pRow2.Controls.Add(ledgerOpenBtn);
+        var ledgerResetBtn = new Button { Text = "이력 초기화", AutoSize = true, Margin = new Padding(0, 2, 0, 0) };
+        ledgerResetBtn.Click += (_, _) => ResetLedger();
+        pRow2.Controls.Add(ledgerResetBtn);
+        pressInner.Controls.Add(pRow2, 0, 1);
+
+        var pHint = new Label
+        {
+            Text = "• 본문은 DB 에 있어 그대로 반출됩니다(파일 불필요).  " +
+                   "• '반출이력에 없는 것만 선택' = 신규+변경분.  " +
+                   "• 반출하면 이력이 누적되어 다음엔 나머지만 나옵니다.",
+            ForeColor = Color.Gray, AutoSize = true, Margin = new Padding(0, 4, 0, 0),
+        };
+        pressInner.Controls.Add(pHint, 0, 2);
+        _pressGroup.Controls.Add(pressInner);
+        top.Controls.Add(_pressGroup, 0, 3);
+
         root.Controls.Add(top, 0, 0);
 
         // ── 합집합 대조 리스트 (반입과 공유) ──────────────────────────
         _cmp = new EnvCompareList { Dock = DockStyle.Fill };
-        _cmp.Configure("매니페스트",
-            new EnvCompareList.ColumnDef("ID", 50, HorizontalAlignment.Left),
-            new EnvCompareList.ColumnDef("폴더", 280, HorizontalAlignment.Left),
-            new EnvCompareList.ColumnDef("파일명", 240, HorizontalAlignment.Left),
-            new EnvCompareList.ColumnDef("확장자", 60, HorizontalAlignment.Left),
-            new EnvCompareList.ColumnDef("크기", 90, HorizontalAlignment.Right),
-            new EnvCompareList.ColumnDef("적재일", 135, HorizontalAlignment.Left),
-            new EnvCompareList.ColumnDef("상태", 70, HorizontalAlignment.Left));
+        ConfigureCmpForDocs();
         root.Controls.Add(_cmp, 0, 1);
 
         // ── 로그 ──────────────────────────────────────────────────────
@@ -188,7 +241,7 @@ public sealed class DbExportTab : TabPage
         bot.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         var btnFlow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Anchor = AnchorStyles.Top | AnchorStyles.Right };
         _exportBtn = new Button { Text = "선택 항목 반출 (본문 포함)", AutoSize = true, Enabled = false };
-        _exportBtn.Click += async (_, _) => await ExportSelectedAsync();
+        _exportBtn.Click += async (_, _) => { if (_pressMode) await ExportPressSelectedAsync(); else await ExportSelectedAsync(); };
         _cmp.SelectionChanged += () => _exportBtn.Enabled = _cmp.SelectedCount > 0;
         btnFlow.Controls.Add(_exportBtn);
         bot.Controls.Add(btnFlow, 0, 0);
@@ -213,6 +266,21 @@ public sealed class DbExportTab : TabPage
         var cfg = AppConfig.Current;
         _search = new SearchService(cfg);
         _repo   = new DocumentRepository(cfg);
+        _press  = new PressCorpusService(cfg);
+        _ = UpdatePressAvailabilityAsync();
+    }
+
+    // press 가용성 프로브(백그라운드) → '보도자료(press)' 대상 라디오 활성 여부.
+    private async Task UpdatePressAvailabilityAsync()
+    {
+        var press = _press;
+        bool available;
+        try { available = await Task.Run(press.IsAvailable); }
+        catch { available = false; }
+        if (IsDisposed || !IsHandleCreated || !ReferenceEquals(press, _press)) return;
+        _targetPress.Enabled = available;
+        // 가용해졌는데 이미 press 모드면(설정 변경 등) 목록 비어있을 수 있으니 안내만.
+        if (!available && _pressMode) { _targetDocs.Checked = true; }
     }
 
     private SearchTarget GetTarget()
@@ -433,5 +501,178 @@ public sealed class DbExportTab : TabPage
             MessageBox.Show(this, ex.Message, "반출 실패");
         }
         finally { _exportBtn.Enabled = _cmp.SelectedCount > 0; }
+    }
+
+    // ─ 보도자료(press) 증분 반출 ─────────────────────────────────────
+
+    private void ConfigureCmpForDocs()
+        => _cmp.Configure("매니페스트",
+            new EnvCompareList.ColumnDef("ID", 50, HorizontalAlignment.Left),
+            new EnvCompareList.ColumnDef("폴더", 280, HorizontalAlignment.Left),
+            new EnvCompareList.ColumnDef("파일명", 240, HorizontalAlignment.Left),
+            new EnvCompareList.ColumnDef("확장자", 60, HorizontalAlignment.Left),
+            new EnvCompareList.ColumnDef("크기", 90, HorizontalAlignment.Right, EnvCompareList.CellSort.Size),
+            new EnvCompareList.ColumnDef("적재일", 135, HorizontalAlignment.Left),
+            new EnvCompareList.ColumnDef("상태", 70, HorizontalAlignment.Left));
+
+    private void ConfigureCmpForPress()
+        => _cmp.Configure("반출이력",
+            new EnvCompareList.ColumnDef("출처", 70, HorizontalAlignment.Left),
+            new EnvCompareList.ColumnDef("게시일", 90, HorizontalAlignment.Left),
+            new EnvCompareList.ColumnDef("폴더", 300, HorizontalAlignment.Left),
+            new EnvCompareList.ColumnDef("파일명", 260, HorizontalAlignment.Left),
+            new EnvCompareList.ColumnDef("확장자", 60, HorizontalAlignment.Left),
+            new EnvCompareList.ColumnDef("글자수", 90, HorizontalAlignment.Right));
+
+    // 대상 전환 — 내부문서/보도자료 그룹 표시 + 대조 리스트 컬럼 교체.
+    private void SetMode(bool press)
+    {
+        _pressMode = press;
+        _searchGroup.Visible = !press;
+        _matchGroup.Visible  = !press;
+        _pressGroup.Visible  = press;
+        _exportBtn.Text = press ? "선택 보도자료 반출 (본문 포함)" : "선택 항목 반출 (본문 포함)";
+
+        if (press)
+        {
+            ConfigureCmpForPress();
+            _cmp.SetRows(Array.Empty<CompareRow>(), compareLoaded: true);   // 불러오기 전 빈 화면
+            _pressStatus.Text = "[목록 불러오기]로 전체↔반출이력을 대조하세요.";
+            _pressStatus.ForeColor = Color.Gray;
+        }
+        else
+        {
+            ConfigureCmpForDocs();
+            if (_manifestLoaded) BuildCompareMode();
+            else FeedSearchMode();
+        }
+    }
+
+    private async Task LoadPressListAsync()
+    {
+        _pressLoadBtn.Enabled = false;
+        _pressStatus.Text = "불러오는 중… (전체 메타 + 반출이력)";
+        _pressStatus.ForeColor = Color.Gray;
+        try
+        {
+            var (meta, ledger) = await Task.Run(() =>
+            {
+                var m = _press.LoadExportMeta();
+                var l = PressExportLedger.Load(_ledgerPath);
+                return (m, l);
+            });
+            _pressMeta = meta;
+            _ledger = ledger;
+            BuildPressCompare();
+            _log.AppendLine($"[보도자료] 전체 {meta.Count:N0}건 · 반출이력 {ledger.Count:N0}건 로드 — {_ledgerPath}");
+        }
+        catch (Exception ex)
+        {
+            _pressStatus.Text = "로드 실패";
+            _pressStatus.ForeColor = Color.Firebrick;
+            MessageBox.Show(this, ex.Message, "보도자료 목록 로드 실패");
+            _log.AppendLine($"[오류] {ex.Message}");
+        }
+        finally { _pressLoadBtn.Enabled = true; }
+    }
+
+    private void BuildPressCompare()
+    {
+        var rows = _pressMeta.Select(m => new CompareRow
+        {
+            Key = ($"{m.Source}|{m.SourceSeq}", m.FileName),   // press UNIQUE 기반 고유키
+            InCompare = _ledger.IsExported(m.Source, m.SourceSeq, m.FileName, m.ContentHash),
+            Cells = new[]
+            {
+                PressCorpusService.SourceLabel(m.Source),
+                m.PublishedDate?.ToString("yyyy-MM-dd") ?? "",
+                m.Folder, m.FileName, m.FileExt,
+                m.CharCount.ToString("N0"),
+            },
+            Item = m,
+        }).ToList();
+        _cmp.SetRows(rows, compareLoaded: true);
+
+        int total = rows.Count;
+        int done  = rows.Count(r => r.InCompare);
+        _pressStatus.Text = $"전체 {total:N0} · 반출됨 {done:N0} · 신규/변경 {total - done:N0}";
+        _pressStatus.ForeColor = Color.Black;
+    }
+
+    private async Task ExportPressSelectedAsync()
+    {
+        var sel = _cmp.SelectedItems.OfType<PressExportMeta>().ToList();
+        if (sel.Count == 0) { MessageBox.Show(this, "반출할 보도자료를 하나 이상 선택하세요.", "선택 없음"); return; }
+
+        using var dlg = new SaveFileDialog
+        {
+            Title = "보도자료 반출 CSV 저장 (본문 포함 — 상대 환경 press_document 적재용)",
+            FileName = $"press_export_{DateTime.Now:yyyyMMdd_HHmmss}.csv",
+            DefaultExt = "csv",
+            Filter = "CSV (*.csv)|*.csv|CSV (*.csd)|*.csd|모든 파일 (*.*)|*.*",
+        };
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        var path = dlg.FileName;
+
+        _exportBtn.Enabled = false;
+        var prev = _pressStatus.Text;
+        _pressStatus.Text = $"반출 중… 0 / {sel.Count:N0}";
+        _pressStatus.ForeColor = Color.Black;
+        try
+        {
+            var ids = sel.Select(m => m.Id).ToList();
+            var written = await Task.Run(() =>
+            {
+                var n = PressTransferCsv.Write(_press, ids, path,
+                    progress: (d, t) => BeginInvoke(new Action(() => _pressStatus.Text = $"반출 중… {d:N0} / {t:N0}")));
+                // 성공 후에만 반출이력 누적(실패 시 다음에 다시 잡히도록).
+                var stamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                foreach (var m in sel)
+                    _ledger.MarkExported(m.Source, m.SourceSeq, m.FileName, m.ContentHash, stamp);
+                _ledger.Save(_ledgerPath);
+                return n;
+            });
+
+            _pressStatus.Text = prev;
+            _log.AppendLine($"[보도자료 반출] {written:N0}건 (본문 포함) → {path}");
+            _log.AppendLine($"[반출이력] 누적 {_ledger.Count:N0}건 — {_ledgerPath}");
+            BuildPressCompare();   // 방금 반출분이 ✓ 로 반영
+            MessageBox.Show(this,
+                $"{written:N0}건을 반출했습니다.\n{path}\n\n반출이력에 누적되어 다음엔 나머지(신규/변경)만 표시됩니다.",
+                "반출 완료");
+        }
+        catch (Exception ex)
+        {
+            _pressStatus.Text = prev;
+            _log.AppendLine($"[보도자료 반출 실패] {ex.Message}");
+            MessageBox.Show(this, ex.Message, "반출 실패");
+        }
+        finally { _exportBtn.Enabled = _cmp.SelectedCount > 0; }
+    }
+
+    private void OpenLedgerFolder()
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(_ledgerPath)!;
+            Directory.CreateDirectory(dir);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(dir) { UseShellExecute = true });
+        }
+        catch (Exception ex) { _log.AppendLine($"[폴더 열기 실패] {ex.Message}"); }
+    }
+
+    private void ResetLedger()
+    {
+        if (MessageBox.Show(this,
+            "반출이력을 초기화하면 다음 반출 때 전체가 다시 '신규'로 잡힙니다.\n계속할까요?",
+            "이력 초기화", MessageBoxButtons.OKCancel) != DialogResult.OK) return;
+        try
+        {
+            if (File.Exists(_ledgerPath)) File.Delete(_ledgerPath);
+            _ledger = new PressExportLedger();
+            if (_pressMode && _pressMeta.Count > 0) BuildPressCompare();
+            _log.AppendLine("[반출이력] 초기화됨");
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "초기화 실패"); }
     }
 }

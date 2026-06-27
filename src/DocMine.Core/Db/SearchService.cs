@@ -40,6 +40,14 @@ public sealed class SearchService
     public const int SnippetLeft  = 20;
     public const int SnippetRight = 220;
 
+    // 스니펫 추출 윈도우 — 본문에서 키워드 주변을 잘라올 범위(문자 수, utf8mb4=문자단위).
+    // 예전엔 LEFT(body,5000) 로 '앞 5000자' 만 봐서 키워드가 그 뒤에 있으면 미리보기/강조가
+    // 폴백(문서 앞부분)됐다. 이제 SQL 에서 LOCATE 로 키워드 위치를 찾아 그 주변만 가져온다.
+    // Lead 만큼 앞 여유를 두고 Window 만큼 잘라오면 ExtractSnippet 이 ±Left/Right 로 다듬는다.
+    // 윈도우가 5000→Window 로 작아져 대량 검색 시 전송/메모리도 오히려 가벼워진다.
+    public const int SnippetLeadChars   = 60;
+    public const int SnippetWindowChars = 800;
+
     private readonly AppConfig _cfg;
 
     public SearchService(AppConfig cfg) => _cfg = cfg;
@@ -148,10 +156,14 @@ public sealed class SearchService
         DateTime? parsedFrom = null, DateTime? parsedTo = null)
     {
         var (whereSql, prms) = ComposeWhere(keyword, target, mode, includeExcluded, idMin, idMax, parsedFrom, parsedTo);
-        // body_text 5000자까지만 가져와서 클라이언트 스니펫 추출. 200건 × 5KB ≈ 1MB.
-        // 5000 자 내 키워드 없으면 ExtractSnippet 이 앞부분 폴백.
+        // 키워드 위치(LOCATE) 주변만 잘라와 클라이언트 스니펫 추출 — 키워드가 본문 어디에
+        // 있든 미리보기/강조가 정상. LOCATE 미발견(0)·빈 키워드면 GREATEST(1,…)=1 로 앞부분 폴백.
+        // 다중 키워드는 첫 키워드 기준으로 윈도우를 잡고, 윈도우 안에서 ExtractSnippet 이 재정렬.
+        var centerKw = PrepareKeywords(keyword, mode) is { Count: > 0 } ks ? ks[0] : "";
         var sql = $@"
-            SELECT id, directory, filename, LEFT(body_text, 5000), parsed_at
+            SELECT id, directory, filename,
+                   SUBSTRING(body_text, GREATEST(1, LOCATE(?, body_text) - {SnippetLeadChars}), {SnippetWindowChars}),
+                   parsed_at
             FROM `{_cfg.DbTable}`
             {whereSql}
             ORDER BY id
@@ -160,6 +172,8 @@ public sealed class SearchService
         using var conn = new DocumentRepository(_cfg).OpenConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
+        // 파라미터 순서 = SQL 의 ? 등장 순서: (1) SELECT 의 LOCATE, (2) WHERE, (3) LIMIT/OFFSET.
+        cmd.Parameters.Add(new MySqlParameter { Value = centerKw });
         foreach (var p in prms)             cmd.Parameters.Add(new MySqlParameter { Value = p });
         cmd.Parameters.Add(new MySqlParameter { Value = limit });
         cmd.Parameters.Add(new MySqlParameter { Value = offset });

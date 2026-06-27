@@ -16,7 +16,13 @@ public sealed record AppConfig(
     string DbName,
     string DbTable,
     IReadOnlyList<string> ScanExcludeDirs,
-    string SettingsPath)
+    string SettingsPath,
+    // 보도자료 코퍼스(press) — 외부 stn_press_db 읽기전용 참조. 환경에 없으면 런타임 무시.
+    bool   PressEnabled,
+    string PressDbName,
+    string PressDbUser,
+    string PressDbPassword,
+    string PressFilesBaseDir)
 {
     // ─ 하드코딩 상수 ─ 사용자가 바꿀 필요 없는 값들.
     //
@@ -53,7 +59,12 @@ public sealed record AppConfig(
             DbName:   data.DbName,
             DbTable:  data.DbTable,
             ScanExcludeDirs: data.ScanExcludeDirs.ToList(),
-            SettingsPath: UserSettings.SettingsPath());
+            SettingsPath: UserSettings.SettingsPath(),
+            PressEnabled:      data.PressEnabled,
+            PressDbName:       data.PressDbName,
+            PressDbUser:       data.PressDbUser,
+            PressDbPassword:   data.PressDbPassword,
+            PressFilesBaseDir: data.PressFilesBaseDir);
     }
 
     public Dictionary<string, string> GetDbConnectionStringDict(bool useDb = true)
@@ -74,5 +85,29 @@ public sealed record AppConfig(
     {
         var parts = GetDbConnectionStringDict(useDb);
         return string.Join(";", parts.Select(p => $"{p.Key}={p.Value}"));
+    }
+
+    /// <summary>
+    /// 보도자료 코퍼스(press) 커넥션 문자열. 호스트/포트는 메인 DB 와 같은 인스턴스로
+    /// 가정해 재사용하고, DB 이름·계정만 press 전용 값을 쓴다. 짧은 Connection Timeout 으로
+    /// press 없는 환경에서 프로브가 빨리 실패하게 한다.
+    ///
+    /// 환경2(검색·반출)는 읽기전용 계정(pdbuser)이면 충분하지만, 환경1(반입)은 쓰기 권한
+    /// 계정으로 설정해야 press_document 를 생성·적재할 수 있다(같은 설정값을 환경별로 다르게).
+    /// useDb=false 는 DB 자체 생성(CREATE DATABASE) 단계에서 쓴다.
+    /// </summary>
+    public string GetPressConnectionString(bool useDb = true)
+    {
+        var dict = new Dictionary<string, string>
+        {
+            ["Server"]             = DbHost,
+            ["Port"]               = DbPort.ToString(),
+            ["User Id"]            = PressDbUser,
+            ["Password"]           = PressDbPassword,
+            ["CharSet"]            = "utf8mb4",
+            ["Connection Timeout"] = "5",
+        };
+        if (useDb) dict["Database"] = PressDbName;
+        return string.Join(";", dict.Select(p => $"{p.Key}={p.Value}"));
     }
 }
