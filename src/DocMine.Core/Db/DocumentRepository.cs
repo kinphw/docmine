@@ -297,6 +297,29 @@ ON DUPLICATE KEY UPDATE
         return (inserted, updated);
     }
 
+    /// <summary>선택 id 들의 본문(body_text)만 id→텍스트로 조회 — '본문 클립보드 복사' 용.</summary>
+    public Dictionary<int, string?> LoadBodyByIds(IReadOnlyCollection<int> ids)
+    {
+        var result = new Dictionary<int, string?>(ids.Count);
+        if (ids.Count == 0) return result;
+
+        var idList = ids.ToList();
+        const int chunkSize = 500;
+        using var conn = OpenConnection();
+        for (var i = 0; i < idList.Count; i += chunkSize)
+        {
+            var chunk = idList.Skip(i).Take(chunkSize).ToList();
+            var placeholders = string.Join(", ", chunk.Select((_, j) => $"@id{j}"));
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"SELECT id, body_text FROM `{_cfg.DbTable}` WHERE id IN ({placeholders})";
+            for (var j = 0; j < chunk.Count; j++) cmd.Parameters.AddWithValue($"@id{j}", chunk[j]);
+            using var rdr = cmd.ExecuteReader();
+            while (rdr.Read())
+                result[rdr.GetInt32(0)] = rdr.IsDBNull(1) ? null : rdr.GetString(1);
+        }
+        return result;
+    }
+
     /// <summary>현재 DB 전체의 (directory, filename) 원본 쌍 — 반입 대조(현재환경) 용.</summary>
     public List<(string Dir, string Fn)> LoadAllKeys()
     {

@@ -21,6 +21,7 @@
 //   - ToolTipForm: owner 없이 top-level Form 으로 떠서 z-order/paint 충돌 차단.
 
 using System.Diagnostics;
+using System.Text;
 using DocMine.Core.Config;
 using DocMine.Core.Db;
 using DocMine.Win32;
@@ -65,6 +66,10 @@ public sealed class SearchTab : TabPage
 
     // 하단 버튼 (페이징 제거 — VirtualMode 로 전체를 한 번에 표시)
     private readonly Button _delBtn, _openBtn, _openPathBtn;
+
+    // '내용 복사' 한 번에 허용하는 최대 행 수 — 대량 본문 클립보드/메모리 폭주 방지.
+    private const int MaxBodyCopyRows = 200;
+    private bool _bodyCopyBusy;   // 내용 복사 재진입 방지(더블클릭/메뉴 연타)
     private readonly Label _infoLabel;
     private const string InfoDefault = "더블클릭: 파일 열기  |  드래그/Ctrl+C: 탐색기로 복사  |  Del: 검색에서 제외";
 
@@ -77,6 +82,8 @@ public sealed class SearchTab : TabPage
 
     // hover tooltip — Timer 기반 (마우스 정지 후 표시).
     private readonly System.Windows.Forms.Timer _hoverTimer;
+    // 본문 복사 등 일시 확인 메시지를 _infoLabel 에 띄웠다 되돌리는 타이머.
+    private readonly System.Windows.Forms.Timer _infoFlashTimer;
     private Point _lastHoverPos;
     private ToolTipForm? _tooltip;
 
@@ -226,7 +233,7 @@ public sealed class SearchTab : TabPage
         // 정렬 화살표를 붙였다 떼기 위한 원본 헤더 텍스트 보존.
         _baseHeaders = _list.Columns.Cast<ColumnHeader>().Select(c => c.Text).ToArray();
         _list.ColumnClick += OnColumnClick;
-        _list.DoubleClick += (_, _) => OpenSelectedFile();
+        _list.DoubleClick += (_, _) => OnListDoubleClick();
         _list.SelectedIndexChanged += (_, _) => OnSelectionChanged();
         _list.MouseMove  += OnListMouseMove;
         _list.MouseLeave += (_, _) => { _hoverTimer!.Stop(); HideTooltip(); };
@@ -240,6 +247,9 @@ public sealed class SearchTab : TabPage
         // OS 기본 ToolTip 은 500ms 정도지만 운영 환경에서 빠른 미리보기 선호.
         _hoverTimer = new System.Windows.Forms.Timer { Interval = 250 };
         _hoverTimer.Tick += OnHoverTimerTick;
+
+        _infoFlashTimer = new System.Windows.Forms.Timer { Interval = 2200 };
+        _infoFlashTimer.Tick += (_, _) => { _infoFlashTimer.Stop(); OnSelectionChanged(); };
 
         // ─ 로그 ────────────────────────────────────────────────────────
         _log = new LogPane { Dock = DockStyle.Fill, Height = 80 };
@@ -513,6 +523,15 @@ public sealed class SearchTab : TabPage
         return Path.Combine(r.Directory, r.Filename);
     }
 
+    // 일시 확인 메시지를 하단 정보 라벨에 띄우고 잠시 후 선택 상태 표시로 되돌린다.
+    private void FlashInfo(string text, Color color)
+    {
+        _infoFlashTimer.Stop();
+        _infoLabel.Text = text;
+        _infoLabel.ForeColor = color;
+        _infoFlashTimer.Start();
+    }
+
     // ─ 헤더 클릭 정렬 ────────────────────────────────────────────────
     private void OnColumnClick(object? sender, ColumnClickEventArgs e)
     {
@@ -759,6 +778,81 @@ public sealed class SearchTab : TabPage
             _log.AppendLine("[클립보드] 복사 실패 (DRM 차단 가능성)");
     }
 
+    // ─ 더블클릭: 파일 있으면 열기, 없으면 내용 복사로 폴백 ───────────────
+    // 보도자료(press)는 원본 파일이 없는 환경(환경1)이 많아, 더블클릭이 자연스럽게
+    // '내용 복사'로 이어지게 한다.
+    private void OnListDoubleClick()
+    {
+        var sel = SelectedRows();
+        if (sel.Count != 1) return;
+        var fp = ResolvePath(sel[0]);
+        if (File.Exists(fp)) OpenSelectedFile();
+        else _ = CopyBodyToClipboardAsync(fileFallback: true);
+    }
+
+    // ─ 내용(본문 전체)을 클립보드로 (DB 본문 — 원본 파일 없어도 확인 가능) ──────
+    // 미리보기 셀은 스니펫만 들고 있으므로, 여기선 선택 행의 전체 본문을 DB 에서 끌어온다.
+    // 우클릭 '내용 복사' 또는 파일 없는 행 더블클릭(fileFallback)에서 호출.
+    private async Task CopyBodyToClipboardAsync(bool fileFallback = false)
+    {
+        if (_bodyCopyBusy) return;
+        var sel = SelectedRows();
+        if (sel.Count == 0) return;
+        if (sel.Count > MaxBodyCopyRows)
+        {
+            MessageBox.Show(this,
+                $"내용 복사는 한 번에 최대 {MaxBodyCopyRows}건까지 가능합니다.\n현재 {sel.Count}건 선택 — 범위를 좁혀 주세요.",
+                "내용 복사");
+            return;
+        }
+
+        _bodyCopyBusy = true;
+        try
+        {
+            var localIds = sel.Where(r => r.Origin == RowOrigin.Local).Select(r => r.Id).ToList();
+            var pressIds = sel.Where(r => r.Origin == RowOrigin.Press).Select(r => r.Id).ToList();
+
+            var (localBodies, pressBodies) = await Task.Run(() =>
+                (_repo.LoadBodyByIds(localIds), _press.LoadContentByIds(pressIds)));
+
+            var sb = new StringBuilder();
+            for (var i = 0; i < sel.Count; i++)
+            {
+                var r = sel[i];
+                var body = r.Origin == RowOrigin.Local
+                    ? (localBodies.TryGetValue(r.Id, out var b) ? b : null)
+                    : (pressBodies.TryGetValue(r.Id, out var c) ? c : null);
+
+                if (i > 0) sb.AppendLine().AppendLine(new string('─', 60)).AppendLine();
+                sb.AppendLine($"[{OriginCell(r)}] {r.Directory} / {r.Filename}");
+                sb.AppendLine();
+                sb.Append(NormalizeNewlines(body));
+                sb.AppendLine();
+            }
+
+            var text = sb.ToString();
+            Clipboard.SetText(text);
+            _log.AppendLine($"[내용 복사] {sel.Count}건 · {text.Length:N0}자 클립보드로 복사 — 붙여넣기로 확인");
+            FlashInfo(
+                fileFallback
+                    ? "✓ 원본 파일이 없어 내용이 대신 클립보드에 복사되었습니다! — Ctrl+V 로 붙여넣기"
+                    : $"✓ 내용 {sel.Count}건 클립보드에 복사되었습니다 — Ctrl+V 로 붙여넣기",
+                Color.SeaGreen);
+        }
+        catch (Exception ex)
+        {
+            _log.AppendLine($"[내용 복사 실패] {ex.Message}");
+            MessageBox.Show(this, ex.Message, "내용 복사 실패");
+        }
+        finally { _bodyCopyBusy = false; }
+    }
+
+    // DB 본문은 개행이 \n 만일 수 있어 Windows 붙여넣기 친화적으로 \r\n 통일.
+    private static string NormalizeNewlines(string? body)
+        => string.IsNullOrEmpty(body)
+            ? "(본문 없음)"
+            : body.Replace("\r\n", "\n").Replace('\r', '\n').Replace("\n", "\r\n");
+
     // ─ 드래그 ────────────────────────────────────────────────────────
 
     private void OnListItemDrag(object? sender, ItemDragEventArgs e)
@@ -806,6 +900,7 @@ public sealed class SearchTab : TabPage
         var singleSel = _list.SelectedIndices.Count == 1;
         menu.Items.Add("파일 열기", null, (_, _) => OpenSelectedFile()).Enabled = singleSel;
         menu.Items.Add("경로 열기", null, (_, _) => OpenSelectedPath()).Enabled = singleSel;
+        menu.Items.Add("내용 복사", null, (_, _) => _ = CopyBodyToClipboardAsync());
         menu.Items.Add(new ToolStripSeparator());
 
         // 우클릭 직전 단독 선택 전환으로 OnSelectionChanged 가 _delBtn 상태(텍스트/활성)를

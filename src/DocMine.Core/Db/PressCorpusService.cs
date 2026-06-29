@@ -272,6 +272,29 @@ public sealed class PressCorpusService
         return result;
     }
 
+    /// <summary>선택 id 들의 본문(content)만 id→텍스트로 조회 — '본문 클립보드 복사' 용.</summary>
+    public Dictionary<int, string?> LoadContentByIds(IReadOnlyCollection<int> ids)
+    {
+        var result = new Dictionary<int, string?>(ids.Count);
+        if (!IsAvailable() || ids.Count == 0) return result;
+
+        var idList = ids.ToList();
+        const int chunkSize = 500;
+        using var conn = OpenConnection();
+        for (var i = 0; i < idList.Count; i += chunkSize)
+        {
+            var chunk = idList.Skip(i).Take(chunkSize).ToList();
+            var placeholders = string.Join(", ", chunk.Select((_, j) => $"@id{j}"));
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"SELECT id, content FROM press_document WHERE id IN ({placeholders})";
+            for (var j = 0; j < chunk.Count; j++) cmd.Parameters.AddWithValue($"@id{j}", chunk[j]);
+            using var rdr = cmd.ExecuteReader();
+            while (rdr.Read())
+                result[rdr.GetInt32(0)] = rdr.IsDBNull(1) ? null : rdr.GetString(1);
+        }
+        return result;
+    }
+
     /// <summary>기관 코드 → 한글 라벨. UI 출처 표시·원본 경로 구성에 공용.</summary>
     public static string SourceLabel(string? source) => source switch
     {
