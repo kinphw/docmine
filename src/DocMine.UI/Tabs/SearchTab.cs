@@ -894,7 +894,7 @@ public sealed class SearchTab : TabPage
         {
             case ColDir:     menu.Items.Add("폴더 경로 복사",   null, (_, _) => CopyField(ColDir));     menu.Items.Add(new ToolStripSeparator()); break;
             case ColFile:    menu.Items.Add("파일명 복사",       null, (_, _) => CopyField(ColFile));    menu.Items.Add(new ToolStripSeparator()); break;
-            case ColPreview: menu.Items.Add("내용 미리보기 복사", null, (_, _) => CopyField(ColPreview)); menu.Items.Add(new ToolStripSeparator()); break;
+            // 내용(본문)은 '내용 복사'(전체)로 대체 — 스니펫 복사는 제거.
         }
 
         var singleSel = _list.SelectedIndices.Count == 1;
@@ -922,10 +922,9 @@ public sealed class SearchTab : TabPage
         {
             vals.Add(fieldIdx switch
             {
-                ColDir     => r.Directory,
-                ColFile    => r.Filename,
-                ColPreview => r.PreviewFull,
-                _          => r.Id.ToString(),
+                ColDir  => r.Directory,
+                ColFile => r.Filename,
+                _       => r.Id.ToString(),
             });
         }
         try
