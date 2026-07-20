@@ -10,6 +10,11 @@
 //
 // 목록 UI 는 반입과 공유하는 EnvCompareList. 본문은 목록에 안 싣고(메타만), 반출
 // 시점에 선택분만 DB 에서 끌어온다(LONGTEXT 대량 로딩 회피).
+//
+// 순번 범위 선택: 검색 결과가 수만 건이면 한 번에 반출하기 부담스러워 'N번째~M번째' 로
+// 잘라 나눠 반출한다. 기준은 DB id 가 아니라 *화면 표시 순번* — id 는 중간에 구멍이
+// 뚫려 있어 'id 1~5000' 이 5000건을 보장하지 않기 때문. 순번은 정렬/표시필터를 그대로
+// 따르므로 화면에 보이는 그대로가 잘린다. 내부문서 전용(press 는 반출이력 증분 방식).
 
 using DocMine.Core.Config;
 using DocMine.Core.Db;
@@ -41,6 +46,12 @@ public sealed class DbExportTab : TabPage
     private readonly TextBox _manifestBox;
     private readonly Label _manifestStatus;
     private readonly CheckBox _matchNameOnlyBox;
+
+    // 순번 범위 선택 (내부문서 전용).
+    private GroupBox _rangeGroup = null!;
+    private readonly TextBox _rangeFrom, _rangeTo;
+    private readonly Button _rangeBtn;
+    private readonly Label _rangeStatus;
 
     private IReadOnlyList<ExportRow> _lastResults = Array.Empty<ExportRow>();   // 검색 모드 결과
     private IReadOnlyList<ExportRow> _fullEnv = Array.Empty<ExportRow>();       // 대조 모드 base(전체 env)
@@ -74,7 +85,7 @@ public sealed class DbExportTab : TabPage
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-        var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 4 };
+        var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 5 };
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
         // ── 대상 토글: 내부문서 / 보도자료(press) ──────────────────────
@@ -141,8 +152,41 @@ public sealed class DbExportTab : TabPage
         _searchGroup.Controls.Add(searchInner);
         top.Controls.Add(_searchGroup, 0, 1);
 
-        // ── 2. 환경 대조 (선택) ───────────────────────────────────────
-        _matchGroup = new GroupBox { Text = "2. 환경 대조 (선택)", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
+        // ── 2. 순번 범위 선택 (선택) ──────────────────────────────────
+        // 검색/대조로 채워진 목록을 'N번째~M번째' 로 잘라 선택. 대량을 나눠 반출할 때.
+        _rangeGroup = new GroupBox { Text = "2. 순번 범위 선택 (선택 · 대량 분할 반출)", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
+        var rangeInner = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 2 };
+        rangeInner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        var rangeRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
+        rangeRow.Controls.Add(new Label { Text = "순번", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
+        _rangeFrom = new TextBox { Width = 80, Font = new Font("맑은 고딕", 10) };
+        _rangeFrom.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; ApplyRange(); } };
+        rangeRow.Controls.Add(_rangeFrom);
+        rangeRow.Controls.Add(new Label { Text = " ~ ", AutoSize = true, Padding = new Padding(4, 6, 4, 0) });
+        _rangeTo = new TextBox { Width = 80, Font = new Font("맑은 고딕", 10) };
+        _rangeTo.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; ApplyRange(); } };
+        rangeRow.Controls.Add(_rangeTo);
+        _rangeBtn = new Button { Text = "범위 선택", AutoSize = true, Margin = new Padding(8, 2, 0, 0) };
+        _rangeBtn.Click += (_, _) => ApplyRange();
+        rangeRow.Controls.Add(_rangeBtn);
+        _rangeStatus = new Label { Text = "(미적용)", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(12, 6, 0, 0) };
+        rangeRow.Controls.Add(_rangeStatus);
+        rangeInner.Controls.Add(rangeRow, 0, 0);
+
+        var rangeHint = new Label
+        {
+            Text = "• 목록의 '순번' 컬럼 기준(기본 ID 오름차순, 정렬·표시필터 반영) · 양끝 포함.  " +
+                   "• 예) 1 ~ 5000 반출 → 다음엔 5001 ~ 10000.  " +
+                   "• 비워두면 처음/끝. 기존 선택은 교체됩니다.",
+            ForeColor = Color.Gray, AutoSize = true, Margin = new Padding(0, 4, 0, 0),
+        };
+        rangeInner.Controls.Add(rangeHint, 0, 1);
+        _rangeGroup.Controls.Add(rangeInner);
+        top.Controls.Add(_rangeGroup, 0, 2);
+
+        // ── 3. 환경 대조 (선택) ───────────────────────────────────────
+        _matchGroup = new GroupBox { Text = "3. 환경 대조 (선택)", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
         var matchInner = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 3 };
         matchInner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
@@ -176,8 +220,14 @@ public sealed class DbExportTab : TabPage
         genRow.Controls.Add(_manifestExportBtn);
         matchInner.Controls.Add(genRow, 0, 2);
         _matchGroup.Controls.Add(matchInner);
-        top.Controls.Add(_matchGroup, 0, 2);
+        top.Controls.Add(_matchGroup, 0, 3);
 
+        _tip.SetToolTip(_rangeFrom,
+            "시작 순번(1부터). 비우면 처음부터.\n목록 '순번' 컬럼과 같은 기준 — 현재 정렬/표시필터를 따릅니다.");
+        _tip.SetToolTip(_rangeTo,
+            "끝 순번(양끝 포함). 비우면 끝까지.\n표시 건수를 넘겨 입력하면 끝까지만 선택합니다.");
+        _tip.SetToolTip(_rangeBtn,
+            "해당 구간의 행만 선택합니다(기존 선택은 해제).\n이후 [선택 항목 반출]로 본문 포함 반출.");
         _tip.SetToolTip(_manifestBox,
             "다른 환경에서 'manifest 내보내기'로 만든 CSV(폴더+파일명).\n불러오면 현재 env 전체와 합집합으로 두 컬럼(현재환경/매니페스트) 대조.");
         _tip.SetToolTip(_matchNameOnlyBox,
@@ -217,7 +267,7 @@ public sealed class DbExportTab : TabPage
         };
         pressInner.Controls.Add(pHint, 0, 2);
         _pressGroup.Controls.Add(pressInner);
-        top.Controls.Add(_pressGroup, 0, 3);
+        top.Controls.Add(_pressGroup, 0, 4);
 
         root.Controls.Add(top, 0, 0);
 
@@ -338,6 +388,56 @@ public sealed class DbExportTab : TabPage
         var rows = _lastResults.Select(r => RowOf(r, inCompare: false)).ToList();
         _cmp.SetRows(rows, compareLoaded: false);
         _statusLabel.Text = $"{_lastResults.Count:N0}건";
+        ResetRangeStatus();   // SetRows 가 선택을 비우므로 범위 표기도 무효
+    }
+
+    // ─ 순번 범위 선택 ─────────────────────────────────────────────────
+    private void ResetRangeStatus()
+    {
+        _rangeStatus.Text = "(미적용)";
+        _rangeStatus.ForeColor = Color.Gray;
+    }
+
+    // 빈칸 = 열린 끝(처음/끝). 잘못된 입력은 알리고 중단.
+    private bool TryParseRange(out int from, out int to)
+    {
+        from = to = 0;
+        var fs = _rangeFrom.Text.Trim();
+        var ts = _rangeTo.Text.Trim();
+
+        if (fs.Length == 0) from = 1;
+        else if (!int.TryParse(fs, out from)) { MessageBox.Show(this, "시작 순번을 정수로 입력하세요.", "범위 오류"); return false; }
+
+        if (ts.Length == 0) to = _cmp.ViewCount;
+        else if (!int.TryParse(ts, out to)) { MessageBox.Show(this, "끝 순번을 정수로 입력하세요.", "범위 오류"); return false; }
+
+        if (from < 1) { MessageBox.Show(this, "순번은 1부터 시작합니다.", "범위 오류"); return false; }
+        if (from > to) { MessageBox.Show(this, $"시작({from:N0})이 끝({to:N0})보다 뒤입니다.", "범위 오류"); return false; }
+        if (from > _cmp.ViewCount)
+        {
+            MessageBox.Show(this, $"시작 순번({from:N0})이 표시 건수({_cmp.ViewCount:N0})를 넘습니다.", "범위 오류");
+            return false;
+        }
+        return true;
+    }
+
+    private void ApplyRange()
+    {
+        if (_pressMode) return;
+        if (_cmp.ViewCount == 0)
+        {
+            MessageBox.Show(this, "목록이 비어 있습니다. 먼저 검색하거나 대조 CSV를 불러오세요.", "목록 없음");
+            return;
+        }
+        if (!TryParseRange(out var from, out var to)) return;
+
+        var n = _cmp.SelectRange(from, to);
+        var hi = Math.Min(to, _cmp.ViewCount);
+        _rangeStatus.Text = $"{from:N0} ~ {hi:N0} → {n:N0}건 선택";
+        _rangeStatus.ForeColor = Color.SeaGreen;
+        _log.AppendLine($"[범위 선택] 순번 {from:N0}~{hi:N0} → {n:N0}건 (표시 {_cmp.ViewCount:N0}건)");
+        if (to > _cmp.ViewCount)
+            _log.AppendLine($"  ⚠ 끝 순번({to:N0})이 표시 건수를 넘어 {hi:N0}까지만 선택했습니다.");
     }
 
     // ─ 대조 모드 ──────────────────────────────────────────────────────
@@ -351,6 +451,7 @@ public sealed class DbExportTab : TabPage
         int total = rows.Count;
         int both  = union.Base.Count(m => m.InCompare);
         _statusLabel.Text = $"현재환경 {total:N0} · 매니페스트 보유 {both:N0} · 미보유(신규) {total - both:N0}";
+        ResetRangeStatus();
     }
 
     private static CompareRow RowOf(ExportRow r, bool inCompare) => new()
@@ -505,8 +606,11 @@ public sealed class DbExportTab : TabPage
 
     // ─ 보도자료(press) 증분 반출 ─────────────────────────────────────
 
+    // 순번 컬럼은 내부문서에서만 — press 는 반출이력 증분이라 범위 개념을 쓰지 않는다.
     private void ConfigureCmpForDocs()
-        => _cmp.Configure("매니페스트",
+    {
+        _cmp.ShowRowNumbers = true;
+        _cmp.Configure("매니페스트",
             new EnvCompareList.ColumnDef("ID", 50, HorizontalAlignment.Left),
             new EnvCompareList.ColumnDef("폴더", 280, HorizontalAlignment.Left),
             new EnvCompareList.ColumnDef("파일명", 240, HorizontalAlignment.Left),
@@ -514,21 +618,26 @@ public sealed class DbExportTab : TabPage
             new EnvCompareList.ColumnDef("크기", 90, HorizontalAlignment.Right, EnvCompareList.CellSort.Size),
             new EnvCompareList.ColumnDef("적재일", 135, HorizontalAlignment.Left),
             new EnvCompareList.ColumnDef("상태", 70, HorizontalAlignment.Left));
+    }
 
     private void ConfigureCmpForPress()
-        => _cmp.Configure("반출이력",
+    {
+        _cmp.ShowRowNumbers = false;
+        _cmp.Configure("반출이력",
             new EnvCompareList.ColumnDef("출처", 70, HorizontalAlignment.Left),
             new EnvCompareList.ColumnDef("게시일", 90, HorizontalAlignment.Left),
             new EnvCompareList.ColumnDef("폴더", 300, HorizontalAlignment.Left),
             new EnvCompareList.ColumnDef("파일명", 260, HorizontalAlignment.Left),
             new EnvCompareList.ColumnDef("확장자", 60, HorizontalAlignment.Left),
             new EnvCompareList.ColumnDef("글자수", 90, HorizontalAlignment.Right));
+    }
 
     // 대상 전환 — 내부문서/보도자료 그룹 표시 + 대조 리스트 컬럼 교체.
     private void SetMode(bool press)
     {
         _pressMode = press;
         _searchGroup.Visible = !press;
+        _rangeGroup.Visible  = !press;
         _matchGroup.Visible  = !press;
         _pressGroup.Visible  = press;
         _exportBtn.Text = press ? "선택 보도자료 반출 (본문 포함)" : "선택 항목 반출 (본문 포함)";

@@ -7,6 +7,10 @@
 // 표시 필터:  [☑ {compare}에 없는 것만 표시]  — 화면을 신규만으로 좁혀 본다(선택과 별개).
 // 행 클릭=토글, Shift+클릭=범위.
 //
+// ShowRowNumbers = true 면 '순번' 컬럼을 덧붙인다(기본 꺼짐 — 반입 탭은 미사용).
+// 순번은 *화면 표시 위치*(1-based)라 정렬/표시필터를 따라 바뀐다. 저장되는 값이 아니라
+// 렌더 시점에 매기므로 ☑/✓ 와 같은 동적 컬럼으로 취급한다. SelectRange 의 기준.
+//
 // WinForms VirtualMode 는 CheckBoxes 미지원 → '선택' 컬럼에 ☑/☐ 를 직접 그린다.
 //
 // 헤더 클릭 정렬: 데이터 컬럼 헤더를 누르면 오름/내림 토글. VirtualMode 라
@@ -41,6 +45,12 @@ public sealed class EnvCompareList : UserControl
     private ColumnHeader _compareCol = null!;
     private int _dataColCount;
     private bool _compareLoaded;
+
+    /// <summary>'순번' 컬럼 표시 여부. Configure 호출 *전* 에 설정할 것.</summary>
+    public bool ShowRowNumbers { get; set; }
+
+    // 고정(동적 렌더) 컬럼 수 — 선택 + 대조 [+ 순번]. 데이터 컬럼 인덱스 기준점.
+    private int _fixedCols = 2;
 
     // 헤더 클릭 정렬 상태 (선택/대조 컬럼 제외, 데이터 컬럼만).
     private string[] _baseHeaders = Array.Empty<string>();   // 화살표 제거용 원본 헤더(전체 컬럼)
@@ -102,6 +112,8 @@ public sealed class EnvCompareList : UserControl
         _list.Columns.Clear();
         _list.Columns.Add("선택", 44, HorizontalAlignment.Center);
         _compareCol = _list.Columns.Add(compareLabel, 0, HorizontalAlignment.Center);   // 대조 로드 전 숨김
+        if (ShowRowNumbers) _list.Columns.Add("순번", 60, HorizontalAlignment.Right);
+        _fixedCols = ShowRowNumbers ? 3 : 2;
         foreach (var c in dataColumns)
             _list.Columns.Add(c.Header, c.Width, c.Align);
 
@@ -124,7 +136,7 @@ public sealed class EnvCompareList : UserControl
 
         _checked.Clear();
         _anchor = -1;
-        if (_sortCol >= 2) SortRows();   // 재검색/재대조 후에도 직전 정렬 기준 유지
+        if (_sortCol >= _fixedCols) SortRows();   // 재검색/재대조 후에도 직전 정렬 기준 유지
         ApplyFilter();
     }
 
@@ -132,6 +144,24 @@ public sealed class EnvCompareList : UserControl
         _rows.Where(r => r.Item is not null && _checked.Contains(r.Key)).Select(r => r.Item!).ToList();
 
     public int SelectedCount => _checked.Count;
+
+    /// <summary>현재 화면에 표시 중인(필터 적용 후) 행 수 — 순번의 상한.</summary>
+    public int ViewCount => _view.Count;
+
+    /// <summary>표시 순번 범위(1-based, 양끝 포함)로 선택을 *교체*. 상한을 넘으면 표시 끝까지로
+    /// 자른다. 반환 = 실제 선택된 건수.</summary>
+    public int SelectRange(int from, int to)
+    {
+        var lo = Math.Max(1, from);
+        var hi = Math.Min(_view.Count, to);
+
+        _checked.Clear();
+        for (var i = lo - 1; i <= hi - 1; i++) _checked.Add(_view[i].Key);
+        _anchor = -1;
+        _list.Invalidate();
+        UpdateInfo();
+        return _checked.Count;
+    }
 
     private void ApplyFilter()
     {
@@ -161,9 +191,9 @@ public sealed class EnvCompareList : UserControl
     // ─ 헤더 클릭 정렬 ────────────────────────────────────────────────
     private void OnColumnClick(object? sender, ColumnClickEventArgs e)
     {
-        // 선택(0)·대조(1) 컬럼은 정렬 제외 — 데이터 컬럼만. 셀이 OnRetrieveItem 에서
-        // 동적 생성(_checked/InCompare)이라 _rows.Cells 로 정렬 불가하기도 하다.
-        if (e.Column < 2 || _rows.Count == 0) return;
+        // 선택·대조·순번 컬럼은 정렬 제외 — 데이터 컬럼만. 셀이 OnRetrieveItem 에서
+        // 동적 생성(_checked/InCompare/표시위치)이라 _rows.Cells 로 정렬 불가하기도 하다.
+        if (e.Column < _fixedCols || _rows.Count == 0) return;
 
         if (_sortCol == e.Column) _sortAsc = !_sortAsc;
         else { _sortCol = e.Column; _sortAsc = true; }
@@ -175,8 +205,8 @@ public sealed class EnvCompareList : UserControl
     // _rows 를 현재 정렬 컬럼/방향으로 in-place 정렬하고 헤더 화살표를 갱신.
     private void SortRows()
     {
-        if (_sortCol < 2) return;
-        int dataIdx = _sortCol - 2;   // Cells 인덱스 (선택·대조 2개 앞섬)
+        if (_sortCol < _fixedCols) return;
+        int dataIdx = _sortCol - _fixedCols;   // Cells 인덱스 (선택·대조[·순번] 이 앞섬)
         var sort = dataIdx >= 0 && dataIdx < _sortDefs.Length ? _sortDefs[dataIdx] : CellSort.Auto;
         int dir = _sortAsc ? 1 : -1;
         _rows.Sort((x, y) =>
@@ -236,11 +266,12 @@ public sealed class EnvCompareList : UserControl
         if (e.ItemIndex < 0 || e.ItemIndex >= _view.Count) { e.Item = new ListViewItem(""); return; }
         var r = _view[e.ItemIndex];
 
-        var cells = new string[2 + _dataColCount];
+        var cells = new string[_fixedCols + _dataColCount];
         cells[0] = _checked.Contains(r.Key) ? "☑" : "☐";
         cells[1] = _compareLoaded ? (r.InCompare ? "✓" : "") : "";
+        if (ShowRowNumbers) cells[2] = (e.ItemIndex + 1).ToString("N0");   // 표시 위치 = 순번
         for (int i = 0; i < _dataColCount; i++)
-            cells[2 + i] = i < r.Cells.Length ? r.Cells[i] : "";
+            cells[_fixedCols + i] = i < r.Cells.Length ? r.Cells[i] : "";
 
         e.Item = new ListViewItem(cells);
     }
