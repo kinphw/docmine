@@ -231,18 +231,40 @@ public sealed class ImportTab : TabPage, IBusyTab
             _log.AppendLine($"\n  반입 완료 — 신규 {ins:N0} · 갱신 {upd:N0}");
             _statusLabel.Text = $"완료 · 신규 {ins:N0} · 갱신 {upd:N0}";
 
-            // 적재 후 현재환경 다시 대조(방금 넣은 건 이제 양쪽에 표시).
-            var envKeys = await Task.Run(() => _repo.LoadAllKeys());
-            BuildUnion(envKeys);
+            await RefreshUnionAsync();   // 방금 넣은 건 이제 양쪽에 표시
         }
-        catch (OperationCanceledException) { _log.AppendLine("\n  중단됨. (트랜잭션 롤백 — 반영 안 됨)"); _statusLabel.Text = "중단됨"; }
-        catch (Exception ex) { _log.AppendLine($"\n[오류] {ex.GetType().Name}: {ex.Message}"); _statusLabel.Text = "오류"; }
+        catch (OperationCanceledException)
+        {
+            _log.UpdateLive("");
+            _log.AppendLine("\n  중단됨. (직전 배치까지는 반영 — 멱등 재반입으로 이어서 완료 가능)");
+            _statusLabel.Text = "중단됨";
+            await RefreshUnionAsync();   // 어디까지 들어갔는지 목록에 반영
+        }
+        catch (Exception ex)
+        {
+            _log.UpdateLive("");
+            _log.AppendLine($"\n[오류] {ex.GetType().Name}: {ex.Message}");
+            _log.AppendLine("  직전 배치까지는 반영됐습니다 — 같은 CSV 를 다시 반입하면 나머지만 이어서 처리됩니다.");
+            _statusLabel.Text = "오류";
+            await RefreshUnionAsync();
+        }
         finally
         {
             SetBusy(false);
             _cts?.Dispose();
             _cts = null;
         }
+    }
+
+    // 현재환경 키를 다시 읽어 대조 갱신. 중단/오류 후에도 '어디까지 반영됐는지' 를 보여준다.
+    private async Task RefreshUnionAsync()
+    {
+        try
+        {
+            var envKeys = await Task.Run(() => _repo.LoadAllKeys());
+            BuildUnion(envKeys);
+        }
+        catch (Exception ex) { _log.AppendLine($"  [대조 갱신 실패] {ex.Message}"); }
     }
 
     private void OnProgress(int done, int total)

@@ -240,18 +240,22 @@ CREATE TABLE IF NOT EXISTS `{_cfg.DbTable}` (
     /// <summary>
     /// 레코드(body_text 포함)를 (directory,filename) UNIQUE 키 기준으로 upsert — 반입.
     /// 재파싱 없이 다른 환경의 파싱 결과를 그대로 적재. 멱등(같은 CSV 재반입해도 안전).
+    /// batchCommit 마다 커밋해 거대 트랜잭션을 피한다([[PressImporter.Upsert]] 와 같은 패턴) —
+    /// 수만 건 반입 중 끊겨도 직전 커밋분은 남고, 멱등이라 재반입으로 이어서 완료된다.
+    /// (단일 트랜잭션이면 마지막 한 건에서 실패해도 전량 롤백이라 처음부터 다시 해야 했다.)
     /// 반환: (신규 삽입 수, 기존 갱신 수).
     /// </summary>
     public (int Inserted, int Updated) UpsertRecords(
         IReadOnlyList<DocRecord> records,
         Action<int, int>? onProgress = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        int batchCommit = 2000)
     {
         int inserted = 0, updated = 0;
         if (records.Count == 0) return (0, 0);
 
         using var conn = OpenConnection();
-        using var tx = conn.BeginTransaction();
+        var tx = conn.BeginTransaction();
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = $@"
@@ -272,27 +276,40 @@ ON DUPLICATE KEY UPDATE
         var pErr = cmd.Parameters.Add("@err",    MySqlDbType.VarChar);
         var pPa  = cmd.Parameters.Add("@pa",     MySqlDbType.DateTime);
 
-        for (var i = 0; i < records.Count; i++)
+        try
         {
-            ct.ThrowIfCancellationRequested();
-            var r = records[i];
-            // 키는 DB 적재본과 동일하게 NFC 정규화(스캔/추출 경로와 일관 — [[CsvIngestHelpers]]).
-            pD.Value    = r.Directory.Normalize(NormalizationForm.FormC);
-            pFn.Value   = r.Filename.Normalize(NormalizationForm.FormC);
-            pExt.Value  = r.Extension ?? "";
-            pSz.Value   = r.FileSize;
-            pMt.Value   = (object?)r.FileMtime ?? DBNull.Value;
-            pBody.Value = (object?)r.BodyText ?? DBNull.Value;
-            pSt.Value   = ValidStatus.Contains(r.ParseStatus) ? r.ParseStatus.ToLowerInvariant() : "success";
-            pErr.Value  = (object?)r.ErrorMsg ?? DBNull.Value;
-            pPa.Value   = (object?)r.ParsedAt ?? DBNull.Value;
+            for (var i = 0; i < records.Count; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                var r = records[i];
+                // 키는 DB 적재본과 동일하게 NFC 정규화(스캔/추출 경로와 일관 — [[CsvIngestHelpers]]).
+                pD.Value    = r.Directory.Normalize(NormalizationForm.FormC);
+                pFn.Value   = r.Filename.Normalize(NormalizationForm.FormC);
+                pExt.Value  = r.Extension ?? "";
+                pSz.Value   = r.FileSize;
+                pMt.Value   = (object?)r.FileMtime ?? DBNull.Value;
+                pBody.Value = (object?)r.BodyText ?? DBNull.Value;
+                pSt.Value   = ValidStatus.Contains(r.ParseStatus) ? r.ParseStatus.ToLowerInvariant() : "success";
+                pErr.Value  = (object?)r.ErrorMsg ?? DBNull.Value;
+                pPa.Value   = (object?)r.ParsedAt ?? DBNull.Value;
 
-            var affected = cmd.ExecuteNonQuery();
-            if (affected == 1) inserted++; else updated++;   // 1=삽입, 2=갱신, 0=동일(기존으로 셈)
+                var affected = cmd.ExecuteNonQuery();
+                if (affected == 1) inserted++; else updated++;   // 1=삽입, 2=갱신, 0=동일(기존으로 셈)
 
-            if ((i & 0x3F) == 0) onProgress?.Invoke(i + 1, records.Count);
+                // batchCommit 마다 끊어 커밋 — 여기까지는 중단/실패해도 남는다.
+                if ((i + 1) % batchCommit == 0)
+                {
+                    tx.Commit(); tx.Dispose();
+                    onProgress?.Invoke(i + 1, records.Count);
+                    tx = conn.BeginTransaction();
+                    cmd.Transaction = tx;
+                }
+                else if ((i & 0x3F) == 0) onProgress?.Invoke(i + 1, records.Count);
+            }
+            tx.Commit();
         }
-        tx.Commit();
+        finally { tx.Dispose(); }
+
         onProgress?.Invoke(records.Count, records.Count);
         return (inserted, updated);
     }
