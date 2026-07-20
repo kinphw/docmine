@@ -293,6 +293,8 @@ public sealed class DbExportTab : TabPage
         _exportBtn = new Button { Text = "선택 항목 반출 (본문 포함)", AutoSize = true, Enabled = false };
         _exportBtn.Click += async (_, _) => { if (_pressMode) await ExportPressSelectedAsync(); else await ExportSelectedAsync(); };
         _cmp.SelectionChanged += () => _exportBtn.Enabled = _cmp.SelectedCount > 0;
+        // 표시 필터가 바뀌면 같은 순번이 다른 행을 가리키므로 직전 범위 표기는 무효.
+        _cmp.ViewChanged += ResetRangeStatus;
         btnFlow.Controls.Add(_exportBtn);
         bot.Controls.Add(btnFlow, 0, 0);
 
@@ -431,13 +433,26 @@ public sealed class DbExportTab : TabPage
         }
         if (!TryParseRange(out var from, out var to)) return;
 
-        var n = _cmp.SelectRange(from, to);
+        var r = _cmp.SelectRange(from, to);
         var hi = Math.Min(to, _cmp.ViewCount);
-        _rangeStatus.Text = $"{from:N0} ~ {hi:N0} → {n:N0}건 선택";
-        _rangeStatus.ForeColor = Color.SeaGreen;
-        _log.AppendLine($"[범위 선택] 순번 {from:N0}~{hi:N0} → {n:N0}건 (표시 {_cmp.ViewCount:N0}건)");
+        _log.AppendLine($"[범위 선택] 순번 {from:N0}~{hi:N0} → {r.Count:N0}건 (표시 {_cmp.ViewCount:N0}건)");
         if (to > _cmp.ViewCount)
             _log.AppendLine($"  ⚠ 끝 순번({to:N0})이 표시 건수를 넘어 {hi:N0}까지만 선택했습니다.");
+
+        // 순번은 *표시 중인* 목록 기준이라, 표시 필터가 꺼진 채로 범위를 자르면 이미
+        // 상대 환경에 있는 것까지 섞인다(조용한 재반출). 그 사실을 눈에 띄게 알린다.
+        if (r.InCompareCount > 0)
+        {
+            _rangeStatus.Text = $"{from:N0} ~ {hi:N0} → {r.Count:N0}건 (매니페스트 보유 {r.InCompareCount:N0}건 포함)";
+            _rangeStatus.ForeColor = Color.DarkOrange;
+            _log.AppendLine($"  ⚠ 이 중 {r.InCompareCount:N0}건은 매니페스트가 이미 보유 — 재반출됩니다.");
+            _log.AppendLine($"     신규만 나눠 반출하려면 [매니페스트에 없는 것만 표시] 를 켜고 범위를 다시 잡으세요.");
+        }
+        else
+        {
+            _rangeStatus.Text = $"{from:N0} ~ {hi:N0} → {r.Count:N0}건 선택";
+            _rangeStatus.ForeColor = Color.SeaGreen;
+        }
     }
 
     // ─ 대조 모드 ──────────────────────────────────────────────────────

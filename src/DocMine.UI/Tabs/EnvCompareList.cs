@@ -66,6 +66,10 @@ public sealed class EnvCompareList : UserControl
 
     public event Action? SelectionChanged;
 
+    /// <summary>표시 필터가 바뀌어 _view(=순번 기준 집합)가 재구성됐을 때. 순번 기반 UI 는
+    /// 이때 표기를 무효화해야 한다 — 같은 순번이 다른 행을 가리키게 되므로.</summary>
+    public event Action? ViewChanged;
+
     public EnvCompareList()
     {
         var bar = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false, Padding = new Padding(0, 0, 0, 4) };
@@ -80,7 +84,7 @@ public sealed class EnvCompareList : UserControl
         bar.Controls.Add(_selNone);
         bar.Controls.Add(_selNotInCompare);
         _showOnlyNew = new CheckBox { AutoSize = true, Visible = false, Margin = new Padding(16, 4, 0, 0) };   // {compare}에 없는 것만 표시
-        _showOnlyNew.CheckedChanged += (_, _) => ApplyFilter();
+        _showOnlyNew.CheckedChanged += (_, _) => { ApplyFilter(); ViewChanged?.Invoke(); };
         bar.Controls.Add(_showOnlyNew);
         _selInfo = new Label { Text = "0건 선택됨", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(16, 6, 0, 0) };
         bar.Controls.Add(_selInfo);
@@ -148,19 +152,28 @@ public sealed class EnvCompareList : UserControl
     /// <summary>현재 화면에 표시 중인(필터 적용 후) 행 수 — 순번의 상한.</summary>
     public int ViewCount => _view.Count;
 
+    /// <summary>SelectRange 결과. InCompareCount = 그중 대조본이 이미 보유한 건수 —
+    /// 표시 필터가 꺼져 있으면 0 이 아닐 수 있고, 그건 '이미 넘어간 것의 재반출' 을 뜻한다.</summary>
+    public readonly record struct RangeResult(int Count, int InCompareCount);
+
     /// <summary>표시 순번 범위(1-based, 양끝 포함)로 선택을 *교체*. 상한을 넘으면 표시 끝까지로
-    /// 자른다. 반환 = 실제 선택된 건수.</summary>
-    public int SelectRange(int from, int to)
+    /// 자른다.</summary>
+    public RangeResult SelectRange(int from, int to)
     {
         var lo = Math.Max(1, from);
         var hi = Math.Min(_view.Count, to);
 
         _checked.Clear();
-        for (var i = lo - 1; i <= hi - 1; i++) _checked.Add(_view[i].Key);
+        var inCompare = 0;
+        for (var i = lo - 1; i <= hi - 1; i++)
+        {
+            _checked.Add(_view[i].Key);
+            if (_view[i].InCompare) inCompare++;
+        }
         _anchor = -1;
         _list.Invalidate();
         UpdateInfo();
-        return _checked.Count;
+        return new RangeResult(_checked.Count, _compareLoaded ? inCompare : 0);
     }
 
     private void ApplyFilter()
