@@ -76,6 +76,10 @@ public sealed record AppConfig(
             ["User Id"]  = DbUser,
             ["Password"] = DbPassword,
             ["CharSet"]  = "utf8mb4",
+            // affected-rows semantics(1=삽입·2=갱신·0=무변경). MySqlConnector 기본은
+            // CLIENT_FOUND_ROWS 라 무변경 upsert 도 1 을 돌려줘 '삽입'으로 오집계된다.
+            // 반입 신규/갱신 카운트가 이 값에 의존하므로 명시적으로 끈다([[UpsertRecords]]).
+            ["UseAffectedRows"] = "true",
         };
         if (useDb) dict["Database"] = DbName;
         return dict;
@@ -106,6 +110,7 @@ public sealed record AppConfig(
             ["Password"]           = PressDbPassword,
             ["CharSet"]            = "utf8mb4",
             ["Connection Timeout"] = "5",
+            ["UseAffectedRows"]    = "true",   // 반입 신규/갱신 카운트 정확도 — 위 주석 참조.
         };
         if (useDb) dict["Database"] = PressDbName;
         return string.Join(";", dict.Select(p => $"{p.Key}={p.Value}"));

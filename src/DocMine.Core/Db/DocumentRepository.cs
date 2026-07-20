@@ -294,7 +294,9 @@ ON DUPLICATE KEY UPDATE
                 pPa.Value   = (object?)r.ParsedAt ?? DBNull.Value;
 
                 var affected = cmd.ExecuteNonQuery();
-                if (affected == 1) inserted++; else updated++;   // 1=삽입, 2=갱신, 0=동일(기존으로 셈)
+                // UseAffectedRows=true 전제 — 1=삽입, 2=갱신, 0=무변경(기존값 동일).
+                // 0·2 는 모두 '기존' 이므로 갱신으로 센다.
+                if (affected == 1) inserted++; else updated++;
 
                 // batchCommit 마다 끊어 커밋 — 여기까지는 중단/실패해도 남는다.
                 if ((i + 1) % batchCommit == 0)
