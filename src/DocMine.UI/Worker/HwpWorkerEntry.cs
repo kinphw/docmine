@@ -88,6 +88,11 @@ internal static class HwpWorkerEntry
                 WriteResponse(HandleReport(req, com));
                 continue;
             }
+            if (req.Op == "copyas")
+            {
+                WriteResponse(HandleCopyAs(req));
+                continue;
+            }
             if (req.Op != "parse")
             {
                 WriteResponse(new ParseResponse(req.Idx, "error", null, $"알 수 없는 op: {req.Op}"));
@@ -205,6 +210,39 @@ internal static class HwpWorkerEntry
         }
     }
 
+    // ── copyas: 열린 상태(=DRM 인증 프로세스의 read = 복호화)로 바이트를 새 확장자로 저장 ──
+    //   원본 확장자가 DRM 보호 대상이라 read 는 filter driver 가 복호화하고,
+    //   대상 확장자(.hw1/.hw1x/.pd1)는 비보호라 write 시 재암호화되지 않는다(운영 DRM 가정).
+    //   명시적 스트림 복사 — user-mode read 를 강제해 decrypt-on-read 경로를 탄다.
+    //   내용 read 는 메인이 아닌 이 워커에서만(DLP silent-kill 회피 — DRM 불변식).
+    private static ParseResponse HandleCopyAs(ParseRequest req)
+    {
+        try
+        {
+            var src = Path.GetFullPath(req.Path);
+            if (string.IsNullOrWhiteSpace(req.Target))
+                return new ParseResponse(req.Idx, "error", null, "대상 경로(target) 없음");
+            var dst = Path.GetFullPath(req.Target);
+            if (!File.Exists(src))
+                return new ParseResponse(req.Idx, "error", null, "원본 파일 없음");
+            if (string.Equals(src, dst, StringComparison.OrdinalIgnoreCase))
+                return new ParseResponse(req.Idx, "error", null, "원본과 대상 경로가 같음");
+
+            using (var input  = new FileStream(src, FileMode.Open,   FileAccess.Read,  FileShare.Read))
+            using (var output = new FileStream(dst, FileMode.Create, FileAccess.Write, FileShare.None))
+                input.CopyTo(output, 1 << 20);
+
+            // text 필드로 저장된 대상 경로를 돌려준다(로그·검증용).
+            return new ParseResponse(req.Idx, "success", dst, null);
+        }
+        catch (Exception ex)
+        {
+            var msg = ex.Message;
+            if (msg.Length > 900) msg = msg[..900];
+            return new ParseResponse(req.Idx, "error", null, msg);
+        }
+    }
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -225,7 +263,7 @@ internal static class HwpWorkerEntry
         Console.Out.Flush();
     }
 
-    private sealed record ParseRequest(string Op, int Idx, string Path, string? Ext, ReportDoc? Report = null);
+    private sealed record ParseRequest(string Op, int Idx, string Path, string? Ext, ReportDoc? Report = null, string? Target = null);
     private sealed record ParseResponse(int Idx, string Status, string? Text, string? Err);
     private sealed record ParseResponse2(int Idx, string Status, DocStructure? Doc, string? Err);
 }

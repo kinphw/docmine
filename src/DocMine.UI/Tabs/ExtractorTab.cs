@@ -25,7 +25,7 @@ public sealed class ExtractorTab : TabPage, IBusyTab
     private readonly CheckBox _hwpBox, _pdfBox;
     private readonly TextBox _srcBox, _dstBox;
     private readonly Button _srcBrowseBtn, _dstBrowseBtn;
-    private readonly Button _startBtn, _stopBtn, _openOutBtn;
+    private readonly Button _startBtn, _stopBtn, _openOutBtn, _saveExtBtn;
     private readonly ProgressBar _progBar;
     private readonly LogPane _log;
     private CancellationTokenSource? _cts;
@@ -87,12 +87,15 @@ public sealed class ExtractorTab : TabPage, IBusyTab
         // 버튼
         var btnRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(0, 6, 0, 6) };
         _startBtn   = new Button { Text = "추출 시작",  AutoSize = true };
+        _saveExtBtn = new Button { Text = "확장자 변경 저장 (hw1/hw1x/pd1)", AutoSize = true, Margin = new Padding(16, 0, 0, 0) };
         _stopBtn    = new Button { Text = "중지",       AutoSize = true, Enabled = false, Margin = new Padding(6, 0, 0, 0) };
         _openOutBtn = new Button { Text = "산출물 열기", AutoSize = true, Enabled = false, Margin = new Padding(6, 0, 0, 0) };
         _startBtn.Click   += async (_, _) => await StartAsync();
+        _saveExtBtn.Click += async (_, _) => await SaveAsExtAsync();
         _stopBtn.Click    += (_, _) => OnStop();
         _openOutBtn.Click += (_, _) => OpenLastOutput();
         btnRow.Controls.Add(_startBtn);
+        btnRow.Controls.Add(_saveExtBtn);
         btnRow.Controls.Add(_stopBtn);
         btnRow.Controls.Add(_openOutBtn);
 
@@ -228,6 +231,7 @@ public sealed class ExtractorTab : TabPage, IBusyTab
         _cts = new CancellationTokenSource();
         _startBtn.Enabled = false;
         _startBtn.Text = "추출 중…";
+        _saveExtBtn.Enabled = false;
         _stopBtn.Enabled = true;
         _stopBtn.Text = "중지";
         _openOutBtn.Enabled = false;
@@ -261,11 +265,155 @@ public sealed class ExtractorTab : TabPage, IBusyTab
             _busy = false;
             _startBtn.Enabled = true;
             _startBtn.Text = "추출 시작";
+            _saveExtBtn.Enabled = true;
             _stopBtn.Enabled = false;
             _stopBtn.Text = "중지";
             _cts?.Dispose();
             _cts = null;
         }
+    }
+
+    // ─ 확장자 변경 저장 (DRM 우회 복사) ───────────────────────────────
+    //   열린 상태(워커의 인증 read = 복호화)로 같은 폴더에 확장자만 바꿔 저장한다.
+    //   .hwp→.hw1 · .hwpx→.hw1x · .pdf→.pd1. 내용 read 는 워커에서만(DRM 불변식).
+    private static string? MapDrmExt(string ext) => ext.ToLowerInvariant() switch
+    {
+        ".hwp"  => ".hw1",
+        ".hwpx" => ".hw1x",
+        ".pdf"  => ".pd1",
+        _       => null,
+    };
+
+    private async Task SaveAsExtAsync()
+    {
+        if (_busy) return;
+
+        var src = _srcBox.Text.Trim();
+        if (src.Length == 0)
+        {
+            MessageBox.Show(this, "입력 경로를 지정하세요.", "경로 누락");
+            return;
+        }
+        var exts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (_hwpBox.Checked) exts.UnionWith(HwpExts);
+        if (_pdfBox.Checked) exts.UnionWith(PdfExts);
+        if (exts.Count == 0)
+        {
+            MessageBox.Show(this, "포맷을 하나 이상 선택하세요.", "포맷 선택");
+            return;
+        }
+
+        List<string> files;
+        try { files = CollectFiles(src, _modeFile.Checked, exts); }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "입력 경로 오류"); return; }
+        if (files.Count == 0)
+        {
+            MessageBox.Show(this, "선택한 포맷의 파일이 없습니다.", "파일 없음");
+            return;
+        }
+
+        var confirm = MessageBox.Show(this,
+            $"{files.Count:N0}개 파일을 같은 폴더에 확장자만 바꿔 저장합니다.\n" +
+            "  .hwp → .hw1   .hwpx → .hw1x   .pdf → .pd1\n\n" +
+            "같은 이름의 대상 파일이 있으면 덮어씁니다. 계속할까요?",
+            "확장자 변경 저장", MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
+        if (confirm != DialogResult.OK) return;
+
+        _busy = true;
+        _cts = new CancellationTokenSource();
+        _startBtn.Enabled = false;
+        _saveExtBtn.Enabled = false;
+        _saveExtBtn.Text = "저장 중…";
+        _stopBtn.Enabled = true;
+        _stopBtn.Text = "중지";
+        _openOutBtn.Enabled = false;
+        _progBar.Value = 0;
+        _progBar.Maximum = files.Count;
+        _lastOutputPath = null;
+        _log.Clear();
+        _log.AppendLine($"  확장자 변경 저장 — 입력 {files.Count:N0}건 (내용 read 는 워커에서)");
+
+        try
+        {
+            await Task.Run(() => CopyExtAll(files, _cts.Token), _cts.Token);
+        }
+        catch (OperationCanceledException) { _log.AppendLine("\n  중단됨."); }
+        catch (Exception ex) { _log.AppendLine($"\n[오류] {ex.GetType().Name}: {ex.Message}"); }
+        finally
+        {
+            _busy = false;
+            _startBtn.Enabled = true;
+            _saveExtBtn.Enabled = true;
+            _saveExtBtn.Text = "확장자 변경 저장 (hw1/hw1x/pd1)";
+            _stopBtn.Enabled = false;
+            _stopBtn.Text = "중지";
+            _cts?.Dispose();
+            _cts = null;
+        }
+    }
+
+    private void CopyExtAll(List<string> files, CancellationToken ct)
+    {
+        Process? worker = StartHwpWorker(out _);   // copyas 는 COM 미사용 — 한/글 안 뜸(lazy)
+        _log.AppendLine($"  ✓ Worker 시작 (PID {worker.Id})");
+        var sw = Stopwatch.StartNew();
+        int ok = 0, fail = 0, done = 0;
+        try
+        {
+            foreach (var f in files)
+            {
+                ct.ThrowIfCancellationRequested();
+                var newExt = MapDrmExt(Path.GetExtension(f));
+                if (newExt is null) { done++; continue; }
+                var target = Path.ChangeExtension(f, newExt);
+
+                _log.UpdateLive($"  [{done + 1}/{files.Count}] {Path.GetFileName(f)} → {Path.GetFileName(target)}");
+                try
+                {
+                    CopyExt(worker, f, target, ct);
+                    ok++;
+                }
+                catch (Exception ex)
+                {
+                    fail++;
+                    _log.AppendLine($"\n  [실패] {Path.GetFileName(f)}: {ex.Message}");
+                }
+                done++;
+                UpdateProgress(done);
+            }
+            _log.AppendLine($"\n  저장 {ok:N0} · 실패 {fail:N0}  ({sw.Elapsed.TotalSeconds:F1}초)");
+            if (ok > 0)
+                _log.AppendLine("  ※ 대상 파일이 정상 열리는지 원본 앱으로 꼭 확인하세요 (DRM 복호화 여부).");
+        }
+        finally
+        {
+            if (worker is not null)
+            {
+                try { worker.StandardInput.WriteLine("{\"op\":\"quit\"}"); worker.StandardInput.Flush(); } catch { }
+                try { worker.WaitForExit(3000); } catch { }
+                try { if (!worker.HasExited) worker.Kill(entireProcessTree: true); } catch { }
+                worker.Dispose();
+            }
+        }
+    }
+
+    private static void CopyExt(Process worker, string src, string target, CancellationToken ct)
+    {
+        var req = new { op = "copyas", idx = 0, path = Path.GetFullPath(src), target = Path.GetFullPath(target) };
+        var reqJson = JsonSerializer.Serialize(req, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        });
+        worker.StandardInput.WriteLine(reqJson);
+        worker.StandardInput.Flush();
+
+        var line = worker.StandardOutput.ReadLine() ?? throw new IOException("worker stdout EOF (워커 사망 가능성)");
+        var resp = JsonSerializer.Deserialize<Resp>(line, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        })!;
+        if (resp.Status != "success") throw new InvalidOperationException(resp.Err ?? "(unknown)");
     }
 
     private void OpenLastOutput()
