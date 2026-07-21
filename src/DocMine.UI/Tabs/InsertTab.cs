@@ -28,6 +28,7 @@ public sealed class InsertTab : TabPage, IBusyTab
     private readonly LinkLabel _useLastScanLink;
     private readonly CheckBox _hwpBox;
     private readonly CheckBox _pdfBox;
+    private readonly CheckBox _retryErrorsBox;   // error 상태 행 재적재(재파싱) — 기본 ON
     private readonly Button _verifyBtn;
     private readonly Label _statusLabel;
     private readonly CheckBox _unloadedOnlyBox;
@@ -100,6 +101,12 @@ public sealed class InsertTab : TabPage, IBusyTab
         _pdfBox = new CheckBox { Text = "PDF (.pdf)", Checked = true, AutoSize = true };
         tgtRow.Controls.Add(_hwpBox);
         tgtRow.Controls.Add(_pdfBox);
+        // error 재적재 — error 상태로 박힌 행을 '미적재' 로 취급해 다시 파싱한다(기본 ON).
+        // DRM 환경에서 python.exe 아닌 이름으로 돌려 error 로 적재된 PDF 복구가 주 용도.
+        _retryErrorsBox = new CheckBox { Text = "error 항목 재적재", Checked = true, AutoSize = true, Margin = new Padding(24, 2, 0, 0) };
+        // 이미 검증된 상태에서만 재검증(미적재 목록이 error 포함/제외로 갱신). 처음엔 아무것도 안 함.
+        _retryErrorsBox.CheckedChanged += (_, _) => { if (_all.Count > 0 && !_busy) _ = VerifyAsync(); };
+        tgtRow.Controls.Add(_retryErrorsBox);
         top.Controls.Add(tgtRow, 0, 2);
 
         // 검증 + 통계 + 미적재만.
@@ -229,12 +236,21 @@ public sealed class InsertTab : TabPage, IBusyTab
         try
         {
             var cfg = AppConfig.Current;
-            var rows = await Task.Run(() =>
+            var retryErrors = _retryErrorsBox.Checked;
+            var (rows, errorRetry) = await Task.Run(() =>
             {
                 var csvRows = CsvIngestHelpers.LoadCsv(csv);
-                var existing = CsvIngestHelpers.LoadExistingKeys(cfg, _repo, csvRows);
-                return csvRows.Select(r => new Row(
-                    r, existing.Contains(CsvIngestHelpers.NormKey(r.Directory, r.Filename)))).ToList();
+                var statuses = CsvIngestHelpers.LoadKeyStatuses(cfg, _repo, csvRows);
+                var errCnt = retryErrors ? statuses.Count(kv => kv.Value == "error") : 0;
+                var result = csvRows.Select(r =>
+                {
+                    var key = CsvIngestHelpers.NormKey(r.Directory, r.Filename);
+                    // error 행은 재적재 대상이면 '미적재' 로 표기(적재됨 아님).
+                    var loaded = statuses.TryGetValue(key, out var st)
+                                 && !(retryErrors && st == "error");
+                    return new Row(r, loaded);
+                }).ToList();
+                return (result, errCnt);
             });
 
             _all.Clear();
@@ -244,7 +260,8 @@ public sealed class InsertTab : TabPage, IBusyTab
 
             var total = _all.Count;
             var loaded = _all.Count(r => r.Loaded);
-            LogBoth($"[검증] {Path.GetFileName(csv)} | table={cfg.DbTable} → 전체 {total:N0} · 적재됨 {loaded:N0} · 미적재 {total - loaded:N0}");
+            var retryNote = errorRetry > 0 ? $" (그 중 error 재적재 {errorRetry:N0})" : "";
+            LogBoth($"[검증] {Path.GetFileName(csv)} | table={cfg.DbTable} → 전체 {total:N0} · 적재됨 {loaded:N0} · 미적재 {total - loaded:N0}{retryNote}");
         }
         catch (Exception ex)
         {
@@ -406,16 +423,17 @@ public sealed class InsertTab : TabPage, IBusyTab
         // HWP / PDF 를 독립 Task 로 동시 실행 — 각자 별도 DB 커넥션·워커·에러로그라 충돌 없음.
         // 한쪽 실패가 다른쪽을 막지 않도록 각 Task 가 자기 예외를 자기 로그에 기록한다.
         var jobs = new List<Task>();
+        var retryErrors = _retryErrorsBox.Checked;
         if (_hwpBox.Checked)
             jobs.Add(RunOneAsync(_hwpLog, _hwpEta, cfg, mode, "HWP", token,
                 () => new HwpInsertRunner(cfg).RunAsync(csv, 0, null,
                     onLog: line => _hwpLog.AppendLine(line), onProgress: OnHwpProgress,
-                    cancellationToken: token)));
+                    cancellationToken: token, retryErrors: retryErrors)));
         if (_pdfBox.Checked)
             jobs.Add(RunOneAsync(_pdfLog, _pdfEta, cfg, mode, "PDF", token,
                 () => new PdfInsertRunner(cfg).RunAsync(csv, 0, null,
                     onLog: line => _pdfLog.AppendLine(line), onProgress: OnPdfProgress,
-                    cancellationToken: token)));
+                    cancellationToken: token, retryErrors: retryErrors)));
 
         try { await Task.WhenAll(jobs); }
         finally

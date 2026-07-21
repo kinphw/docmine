@@ -74,7 +74,8 @@ ON DUPLICATE KEY UPDATE
         int? end = null,
         Action<string>? onLog = null,
         Action<PdfInsertProgress>? onProgress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool retryErrors = false)
     {
         _onLog = onLog;
         var allRows = CsvIngestHelpers.LoadCsv(csvPath);
@@ -94,9 +95,20 @@ ON DUPLICATE KEY UPDATE
         }
 
         _repo.EnsureDatabase();
-        var knownKeys = CsvIngestHelpers.LoadExistingKeys(_cfg, _repo, rows);
+        // 상태별 기적재 판정 — retryErrors 면 error 행은 '기적재' 에서 빠져 재파싱된다.
+        // (DRM 로 python.exe 아닌 이름일 때 error 로 박힌 PDF 를, 정상 실행 후 복구하는 경로.)
+        var statuses = CsvIngestHelpers.LoadKeyStatuses(_cfg, _repo, rows);
+        var knownKeys = new HashSet<(string, string)>();
+        var errorRetry = 0;
+        foreach (var (key, status) in statuses)
+        {
+            if (retryErrors && status == "error") { errorRetry++; continue; }
+            knownKeys.Add(key);
+        }
         if (knownKeys.Count > 0)
             onLog?.Invoke($"  ✓ DB 기존 파일 {knownKeys.Count:N0}건은 파싱 없이 건너뜁니다.");
+        if (errorRetry > 0)
+            onLog?.Invoke($"  ↻ error 상태 {errorRetry:N0}건은 재적재(재파싱) 대상입니다.");
 
         // ── 1) 기적재(DB 기존 키) 제외 — 진행 분모는 '미적재(처리 대상)' 기준 ──
         // 기적재는 진행 카운트에 더하지 않고 별도로만 표기한다. 진행바가 0% 에서 시작해

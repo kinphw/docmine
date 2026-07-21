@@ -95,9 +95,9 @@ public static class CsvIngestHelpers
             .Trim()
             .ToLowerInvariant();
 
-    /// <summary>(directory, filename) chunked lookup — 이미 DB 에 있는 행은 skip.
-    /// 반환 집합은 <see cref="NormKey"/> 로 정규화된 키. 호출부도 NormKey 로 비교할 것.</summary>
-    public static HashSet<(string, string)> LoadExistingKeys(
+    /// <summary>DB 에 이미 있는 후보 행들의 <see cref="NormKey"/> → parse_status 맵.
+    /// 재적재 판정의 원천 — 호출부가 상태별로 skip/재처리를 결정한다.</summary>
+    public static Dictionary<(string, string), string> LoadKeyStatuses(
         AppConfig cfg, DocumentRepository repo, List<CsvRow> rows)
     {
         var candidates = rows
@@ -105,8 +105,8 @@ public static class CsvIngestHelpers
             .Select(r => (r.Directory, r.Filename))
             .Distinct()
             .ToList();
-        var existing = new HashSet<(string, string)>();
-        if (candidates.Count == 0) return existing;
+        var result = new Dictionary<(string, string), string>();
+        if (candidates.Count == 0) return result;
 
         const int chunkSize = 500;
         using var conn = repo.OpenConnection();
@@ -116,7 +116,7 @@ public static class CsvIngestHelpers
             var placeholders = string.Join(", ", chunk.Select((_, j) => $"(@d{j}, @f{j})"));
             using var cmd = conn.CreateCommand();
             cmd.CommandText =
-                $"SELECT directory, filename FROM `{cfg.DbTable}` " +
+                $"SELECT directory, filename, parse_status FROM `{cfg.DbTable}` " +
                 $"WHERE (directory, filename) IN ({placeholders})";
             for (var j = 0; j < chunk.Count; j++)
             {
@@ -128,8 +128,23 @@ public static class CsvIngestHelpers
             }
             using var rdr = cmd.ExecuteReader();
             while (rdr.Read())
-                existing.Add(NormKey(rdr.GetString(0), rdr.GetString(1)));
+                result[NormKey(rdr.GetString(0), rdr.GetString(1))] =
+                    rdr.IsDBNull(2) ? "" : rdr.GetString(2);
         }
+        return result;
+    }
+
+    /// <summary>(directory, filename) chunked lookup — 이미 DB 에 있는(=재처리 불필요) 행의 키.
+    /// 반환 집합은 <see cref="NormKey"/> 로 정규화된 키. 호출부도 NormKey 로 비교할 것.
+    /// <paramref name="retryErrors"/>=true 면 parse_status='error' 행은 '적재됨'으로 치지 않아
+    /// (집합에서 제외) 다음 적재에서 재파싱된다 — DRM/일시 오류로 error 로 박힌 것 복구용.</summary>
+    public static HashSet<(string, string)> LoadExistingKeys(
+        AppConfig cfg, DocumentRepository repo, List<CsvRow> rows, bool retryErrors = false)
+    {
+        var statuses = LoadKeyStatuses(cfg, repo, rows);
+        var existing = new HashSet<(string, string)>();
+        foreach (var (key, status) in statuses)
+            if (!(retryErrors && status == "error")) existing.Add(key);
         return existing;
     }
 
