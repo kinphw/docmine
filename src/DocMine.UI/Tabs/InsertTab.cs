@@ -21,14 +21,16 @@ namespace DocMine.UI.Tabs;
 
 public sealed class InsertTab : TabPage, IBusyTab
 {
-    private sealed record Row(CsvRow Csv, bool Loaded);
+    // Loaded = DB 에 존재(성공·empty·error 무관). IsError = 그 중 parse_status='error'.
+    // 즉 error 는 '기적재' 의 하위(재적재 필요) — '미적재'(!Loaded) 와 완전히 다르다.
+    private sealed record Row(CsvRow Csv, bool Loaded, bool IsError);
 
     private DocumentRepository _repo;
     private readonly TextBox _csvBox;
     private readonly LinkLabel _useLastScanLink;
     private readonly CheckBox _hwpBox;
     private readonly CheckBox _pdfBox;
-    private readonly CheckBox _retryErrorsBox;   // error 상태 행 재적재(재파싱) — 기본 ON
+    private readonly CheckBox _errorOnlyBox;     // 'error 항목만 표시' 필터 (기적재 중 error 만)
     private readonly Button _verifyBtn;
     private readonly Label _statusLabel;
     private readonly CheckBox _unloadedOnlyBox;
@@ -101,12 +103,6 @@ public sealed class InsertTab : TabPage, IBusyTab
         _pdfBox = new CheckBox { Text = "PDF (.pdf)", Checked = true, AutoSize = true };
         tgtRow.Controls.Add(_hwpBox);
         tgtRow.Controls.Add(_pdfBox);
-        // error 재적재 — error 상태로 박힌 행을 '미적재' 로 취급해 다시 파싱한다(기본 ON).
-        // DRM 환경에서 python.exe 아닌 이름으로 돌려 error 로 적재된 PDF 복구가 주 용도.
-        _retryErrorsBox = new CheckBox { Text = "error 항목 재적재", Checked = true, AutoSize = true, Margin = new Padding(24, 2, 0, 0) };
-        // 이미 검증된 상태에서만 재검증(미적재 목록이 error 포함/제외로 갱신). 처음엔 아무것도 안 함.
-        _retryErrorsBox.CheckedChanged += (_, _) => { if (_all.Count > 0 && !_busy) _ = VerifyAsync(); };
-        tgtRow.Controls.Add(_retryErrorsBox);
         top.Controls.Add(tgtRow, 0, 2);
 
         // 검증 + 통계 + 미적재만.
@@ -117,6 +113,10 @@ public sealed class InsertTab : TabPage, IBusyTab
         _unloadedOnlyBox = new CheckBox { Text = "미적재만 표시", AutoSize = true, Margin = new Padding(12, 4, 0, 0) };
         _unloadedOnlyBox.CheckedChanged += (_, _) => ApplyFilter();
         verifyRow.Controls.Add(_unloadedOnlyBox);
+        // error 는 '기적재' 의 하위라 미적재와 별개 필터. 켜서 error 만 골라 '선택 항목 적재' 로 재적재.
+        _errorOnlyBox = new CheckBox { Text = "error 항목만 표시", AutoSize = true, ForeColor = Color.Firebrick, Margin = new Padding(12, 4, 0, 0) };
+        _errorOnlyBox.CheckedChanged += (_, _) => ApplyFilter();
+        verifyRow.Controls.Add(_errorOnlyBox);
         _statusLabel = new Label { Text = "", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(12, 6, 0, 0) };
         verifyRow.Controls.Add(_statusLabel);
         top.Controls.Add(verifyRow, 0, 3);
@@ -132,6 +132,7 @@ public sealed class InsertTab : TabPage, IBusyTab
         };
         _list.Columns.Add("선택",   44, HorizontalAlignment.Center);
         _list.Columns.Add("적재",   44, HorizontalAlignment.Center);
+        _list.Columns.Add("상태",   56, HorizontalAlignment.Center);
         _list.Columns.Add("폴더",  300);
         _list.Columns.Add("파일명", 240);
         _list.Columns.Add("확장자",  60);
@@ -236,21 +237,17 @@ public sealed class InsertTab : TabPage, IBusyTab
         try
         {
             var cfg = AppConfig.Current;
-            var retryErrors = _retryErrorsBox.Checked;
-            var (rows, errorRetry) = await Task.Run(() =>
+            var rows = await Task.Run(() =>
             {
                 var csvRows = CsvIngestHelpers.LoadCsv(csv);
                 var statuses = CsvIngestHelpers.LoadKeyStatuses(cfg, _repo, csvRows);
-                var errCnt = retryErrors ? statuses.Count(kv => kv.Value == "error") : 0;
-                var result = csvRows.Select(r =>
+                return csvRows.Select(r =>
                 {
                     var key = CsvIngestHelpers.NormKey(r.Directory, r.Filename);
-                    // error 행은 재적재 대상이면 '미적재' 로 표기(적재됨 아님).
-                    var loaded = statuses.TryGetValue(key, out var st)
-                                 && !(retryErrors && st == "error");
-                    return new Row(r, loaded);
+                    // Loaded = DB 존재(status 무관). error 도 '적재됨'(단 IsError 로 구분).
+                    var inDb = statuses.TryGetValue(key, out var st);
+                    return new Row(r, inDb, inDb && st == "error");
                 }).ToList();
-                return (result, errCnt);
             });
 
             _all.Clear();
@@ -260,8 +257,10 @@ public sealed class InsertTab : TabPage, IBusyTab
 
             var total = _all.Count;
             var loaded = _all.Count(r => r.Loaded);
-            var retryNote = errorRetry > 0 ? $" (그 중 error 재적재 {errorRetry:N0})" : "";
-            LogBoth($"[검증] {Path.GetFileName(csv)} | table={cfg.DbTable} → 전체 {total:N0} · 적재됨 {loaded:N0} · 미적재 {total - loaded:N0}{retryNote}");
+            var errs = _all.Count(r => r.IsError);
+            var errPart = errs > 0 ? $" (error {errs:N0})" : "";
+            var errHint = errs > 0 ? "  ※ error 는 'error 항목만 표시' 로 골라 [선택 항목 적재] 하면 재적재됩니다." : "";
+            LogBoth($"[검증] {Path.GetFileName(csv)} | table={cfg.DbTable} → 전체 {total:N0} · 적재됨 {loaded:N0}{errPart} · 미적재 {total - loaded:N0}{errHint}");
         }
         catch (Exception ex)
         {
@@ -277,9 +276,17 @@ public sealed class InsertTab : TabPage, IBusyTab
 
     private void ApplyFilter()
     {
+        // 두 필터는 각각 '해당 것만' 관점. 둘 다 켜면 합집합(미적재 ∪ error) = '조치 필요한 것'.
+        var unloadedOnly = _unloadedOnlyBox.Checked;
+        var errorOnly = _errorOnlyBox.Checked;
         _viewRows.Clear();
         foreach (var r in _all)
-            if (!_unloadedOnlyBox.Checked || !r.Loaded) _viewRows.Add(r);
+        {
+            bool show = (!unloadedOnly && !errorOnly)
+                        || (unloadedOnly && !r.Loaded)
+                        || (errorOnly && r.IsError);
+            if (show) _viewRows.Add(r);
+        }
         _anchorIndex = -1;   // 뷰 재구성 — 인덱스 기준점 무효화
         _list.VirtualListSize = _viewRows.Count;
         _list.Invalidate();
@@ -295,8 +302,14 @@ public sealed class InsertTab : TabPage, IBusyTab
     {
         var total = _all.Count;
         var loaded = _all.Count(r => r.Loaded);
-        var note = _unloadedOnlyBox.Checked ? "  (미적재만 표시)" : "";
-        _statusLabel.Text = total == 0 ? "" : $"전체 {total:N0} · 적재됨 {loaded:N0} · 미적재 {total - loaded:N0}{note}";
+        var errs = _all.Count(r => r.IsError);
+        var errPart = errs > 0 ? $" (error {errs:N0})" : "";
+        var filters = new List<string>();
+        if (_unloadedOnlyBox.Checked) filters.Add("미적재만");
+        if (_errorOnlyBox.Checked) filters.Add("error만");
+        var note = filters.Count > 0 ? $"  ({string.Join(" + ", filters)} 표시)" : "";
+        _statusLabel.Text = total == 0 ? ""
+            : $"전체 {total:N0} · 적재됨 {loaded:N0}{errPart} · 미적재 {total - loaded:N0}{note}";
     }
 
     private void OnRetrieveItem(object? sender, RetrieveVirtualItemEventArgs e)
@@ -306,13 +319,20 @@ public sealed class InsertTab : TabPage, IBusyTab
         var c = row.Csv;
         var sizeStr = c.SizeBytes >= 1024 * 1024 ? $"{c.SizeBytes / 1024.0 / 1024.0:F1} MB" : $"{c.SizeBytes / 1024.0:F0} KB";
         var key = CsvIngestHelpers.NormKey(c.Directory, c.Filename);
-        // subitem 순서 = 컬럼 (선택, 적재, 폴더, 파일명, 확장자, 크기, 수정일).
-        e.Item = new ListViewItem(new[]
+        // subitem 순서 = 컬럼 (선택, 적재, 상태, 폴더, 파일명, 확장자, 크기, 수정일).
+        var item = new ListViewItem(new[]
         {
             _checkedKeys.Contains(key) ? "☑" : "☐",
             row.Loaded ? "✓" : "",
+            row.IsError ? "error" : "",
             c.Directory, c.Filename, c.Extension, sizeStr, c.Modified,
         });
+        if (row.IsError)
+        {
+            item.UseItemStyleForSubItems = false;
+            item.SubItems[2].ForeColor = Color.Firebrick;   // '상태' 셀만 빨강
+        }
+        e.Item = item;
     }
 
     private void OnListMouseClick(object? sender, MouseEventArgs e)
@@ -420,10 +440,13 @@ public sealed class InsertTab : TabPage, IBusyTab
         var cfg = AppConfig.Current;
         var mode = tempCsv ? $"선택 항목 적재 ({selectedCount:N0}건)" : "미적재 전체 적재 (기적재 skip)";
 
+        // '선택 항목 적재' 는 사용자가 고른 것(=error 재적재 대상 포함)이므로 error 도 재파싱.
+        // '미적재 전체 적재' 는 기적재(성공·error 모두) skip — error 는 선택으로만 재적재.
+        var retryErrors = tempCsv;
+
         // HWP / PDF 를 독립 Task 로 동시 실행 — 각자 별도 DB 커넥션·워커·에러로그라 충돌 없음.
         // 한쪽 실패가 다른쪽을 막지 않도록 각 Task 가 자기 예외를 자기 로그에 기록한다.
         var jobs = new List<Task>();
-        var retryErrors = _retryErrorsBox.Checked;
         if (_hwpBox.Checked)
             jobs.Add(RunOneAsync(_hwpLog, _hwpEta, cfg, mode, "HWP", token,
                 () => new HwpInsertRunner(cfg).RunAsync(csv, 0, null,
