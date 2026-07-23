@@ -25,6 +25,9 @@ internal static class Program
             return HwpWorkerEntry.Run(args);
         if (args.Length > 0 && args[0] == "--pdf-worker")
             return PdfWorkerEntry.Run(args);
+        // 헤드리스 적재 테스트 (개발/검증 전용) — 멀티워커 병렬 적재 실측.
+        if (args.Length > 0 && args[0] == "--insert-test")
+            return InsertTestEntry.Run(args);
 
         // ── GUI 모드 ──────────────────────────────────────────────────
         // 부모가 어떻게 죽든 자식 워커 인스턴스도 함께 종료되도록 Job Object 자가 할당.

@@ -75,7 +75,8 @@ ON DUPLICATE KEY UPDATE
         Action<string>? onLog = null,
         Action<PdfInsertProgress>? onProgress = null,
         CancellationToken cancellationToken = default,
-        bool retryErrors = false)
+        bool retryErrors = false,
+        int? maxWorkers = null)
     {
         _onLog = onLog;
         var allRows = CsvIngestHelpers.LoadCsv(csvPath);
@@ -144,8 +145,8 @@ ON DUPLICATE KEY UPDATE
         if (tasks.Count == 0 || cancellationToken.IsCancellationRequested)
             goto Finalize;
 
-        var workers = Math.Max(1, Math.Min(Environment.ProcessorCount, tasks.Count));
-        onLog?.Invoke($"  파서 워커 {workers}개 병렬 (논리 CPU {Environment.ProcessorCount}개)…");
+        var workers = Math.Max(1, Math.Min(maxWorkers ?? Environment.ProcessorCount, tasks.Count));
+        onLog?.Invoke($"  파서 워커 {workers}개 병렬 (배분 예산 {(maxWorkers ?? Environment.ProcessorCount)}개 / 논리 CPU {Environment.ProcessorCount}개)…");
 
         // 작업을 워커 수로 라운드로빈 분배 — 각 워커 = 자기 큐를 직렬 처리.
         var queues = new List<List<(int Idx, string Path, CsvRow Row)>>();

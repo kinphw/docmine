@@ -52,6 +52,7 @@ internal static class HwpWorkerEntry
         using var com = new HwpComExtractor(restartEvery: 500, killOnRestart: !keepHwp);
 
         var zipReader = new HwpxZipReader();
+        var binReader = new HwpBinaryReader();
         var sectionParser = new SectionParser();
 
         Console.Error.WriteLine($"[HwpWorker] ready (PID={Environment.ProcessId}, keepHwp={keepHwp})");
@@ -99,7 +100,7 @@ internal static class HwpWorkerEntry
                 continue;
             }
 
-            var resp = HandleParse(req, zipReader, sectionParser, com);
+            var resp = HandleParse(req, zipReader, binReader, sectionParser, com);
             WriteResponse(resp);
         }
 
@@ -111,6 +112,7 @@ internal static class HwpWorkerEntry
     private static ParseResponse HandleParse(
         ParseRequest req,
         HwpxZipReader zipReader,
+        HwpBinaryReader binReader,
         SectionParser sectionParser,
         HwpComExtractor com)
     {
@@ -134,7 +136,24 @@ internal static class HwpWorkerEntry
             }
             else
             {
-                text = com.Extract(req.Path);
+                // 바이너리 .hwp — 1차: 매니지드 직접 파싱(COM/한글 무의존).
+                //   배포용/암호화/구형/파싱실패, 또는 추출 0자 → COM 백엔드로 폴백(안전망).
+                //   폴백이 걸리면 stderr 로 사유를 남겨 빈도 추적 가능하게 한다.
+                try
+                {
+                    var doc = binReader.ReadDocument(req.Path);
+                    text = doc.ExtractText(skipEmpty: true);
+                    if (string.IsNullOrWhiteSpace(text))
+                    {
+                        Console.Error.WriteLine($"[HwpWorker] .hwp 매니지드 추출 0자 → COM 재확인: {Path.GetFileName(req.Path)}");
+                        text = com.Extract(req.Path);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[HwpWorker] .hwp 매니지드→COM 폴백 ({ex.GetType().Name}): {ex.Message}");
+                    text = com.Extract(req.Path);
+                }
             }
 
             return new ParseResponse(req.Idx, "success", text, null);

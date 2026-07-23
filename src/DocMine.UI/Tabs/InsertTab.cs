@@ -7,9 +7,10 @@
 //   3) [선택 항목 적재] — 검증 리스트에서 체크한 행만 임시 CSV 로 추려 적재.
 //
 // 대상(HWP/PDF) 체크박스로 선택. 각 Runner 가 자기 확장자만 필터링하므로
-// 단일 CSV 를 공유한다. 둘 다 선택하면 독립 Task 로 *동시 병렬* 적재하고
-// (각자 별도 DB 커넥션·워커·에러로그라 충돌 없음) 로그창을 좌우로 나눠 표시한다.
-// 한 대상 실패해도 다른 대상은 계속(각 Task 가 자기 예외를 자기 로그에 기록).
+// 단일 CSV 를 공유한다. 둘 다 선택하면 HWP → PDF *순차* 적재한다 — 각 단계가 논리 CPU 를
+// 전량 쓰게 해(동시 실행 시 값싼 HWP 가 코어를 점유해 비싼 PDF 를 굶기는 유휴 방지) 더 빠르고
+// 견고하다(실측: PDF 파일당 ~10배 비쌈). 로그창은 좌우로 나눠 HWP→PDF 순으로 채운다.
+// 한 대상 실패해도 다른 대상은 계속(RunOneAsync 가 자기 예외를 자기 로그에 삼킴).
 // 진행 분모는 '미적재(처리 대상)' 기준 — 기적재(skip)는 분모에서 빼고 별도 표기.
 
 using DocMine.Core.Config;
@@ -444,21 +445,24 @@ public sealed class InsertTab : TabPage, IBusyTab
         // '미적재 전체 적재' 는 기적재(성공·error 모두) skip — error 는 선택으로만 재적재.
         var retryErrors = tempCsv;
 
-        // HWP / PDF 를 독립 Task 로 동시 실행 — 각자 별도 DB 커넥션·워커·에러로그라 충돌 없음.
-        // 한쪽 실패가 다른쪽을 막지 않도록 각 Task 가 자기 예외를 자기 로그에 기록한다.
-        var jobs = new List<Task>();
-        if (_hwpBox.Checked)
-            jobs.Add(RunOneAsync(_hwpLog, _hwpEta, cfg, mode, "HWP", token,
-                () => new HwpInsertRunner(cfg).RunAsync(csv, 0, null,
-                    onLog: line => _hwpLog.AppendLine(line), onProgress: OnHwpProgress,
-                    cancellationToken: token, retryErrors: retryErrors)));
-        if (_pdfBox.Checked)
-            jobs.Add(RunOneAsync(_pdfLog, _pdfEta, cfg, mode, "PDF", token,
-                () => new PdfInsertRunner(cfg).RunAsync(csv, 0, null,
-                    onLog: line => _pdfLog.AppendLine(line), onProgress: OnPdfProgress,
-                    cancellationToken: token, retryErrors: retryErrors)));
-
-        try { await Task.WhenAll(jobs); }
+        // HWP → PDF 를 *순차* 실행 — 각 단계가 논리 CPU 를 전량 사용(maxWorkers 기본 = 논리 CPU).
+        // 동시 실행하면 값싼 HWP(매니지드)가 일찍 끝나며 코어를 놓지 못해, 파일당 ~10배 비싼
+        // PDF 를 굶기는 유휴가 생긴다(실측). 순차는 그 유휴를 없애 더 빠르고 견고하며 배분 상수도
+        // 불필요. 로그 패널은 둘 다 유지 — HWP 가 먼저 채워지고 PDF 가 이어진다.
+        // RunOneAsync 가 자기 예외를 자기 로그에 삼키므로, HWP 가 실패해도 PDF 는 계속된다.
+        try
+        {
+            if (_hwpBox.Checked)
+                await RunOneAsync(_hwpLog, _hwpEta, cfg, mode, "HWP", token,
+                    () => new HwpInsertRunner(cfg).RunAsync(csv, 0, null,
+                        onLog: line => _hwpLog.AppendLine(line), onProgress: OnHwpProgress,
+                        cancellationToken: token, retryErrors: retryErrors));
+            if (_pdfBox.Checked && !token.IsCancellationRequested)
+                await RunOneAsync(_pdfLog, _pdfEta, cfg, mode, "PDF", token,
+                    () => new PdfInsertRunner(cfg).RunAsync(csv, 0, null,
+                        onLog: line => _pdfLog.AppendLine(line), onProgress: OnPdfProgress,
+                        cancellationToken: token, retryErrors: retryErrors));
+        }
         finally
         {
             SetBusy(false);
